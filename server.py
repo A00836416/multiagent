@@ -1,12 +1,15 @@
 from flask import Flask, render_template, jsonify, request
-from pathfinding_model import RobotAgent, ObstacleAgent, PathFindingModel
+from pathfinding_model import RobotAgent, ObstacleAgent, ChargingStation, PathFindingModel
 import json
+from flask_cors import CORS  # Para permitir conexiones desde Unity
 
 app = Flask(__name__)
+CORS(app)  # Habilitar CORS para todas las rutas
 
 # Modelo global para mantener el estado
 model = None
 obstacles = []
+charging_stations = []
 robots_config = []
 
 @app.route('/')
@@ -17,38 +20,58 @@ def index():
 @app.route('/init', methods=['POST'])
 def initialize():
     """Inicializa o reinicia el modelo con parámetros dados"""
-    global model, obstacles, robots_config
+    global model, obstacles, charging_stations, robots_config
     
     data = request.json
     width = int(data.get('width', 10))
     height = int(data.get('height', 10))
     robots_config = data.get('robots', [])
+    charging_stations_config = data.get('charging_stations', [])
+    obstacles_list = data.get('obstacles', [])  
     
     # Asegurar que todos los robots tengan configuración de inicio y meta
     for i, robot in enumerate(robots_config):
         if 'start' not in robot or 'goal' not in robot:
             return jsonify({'error': f'Configuración incompleta para el robot {i+1}'}), 400
     
-    # Inicializar el modelo con múltiples robots
-    model = PathFindingModel(width, height, robots_config)
+    # Inicializar el modelo con múltiples robots y estaciones de carga
+    model = PathFindingModel(width, height, robots_config, charging_stations_config)
+    
+    # Añadir obstáculos si se proporcionan
     obstacles = []
+    if obstacles_list:
+        for obs in obstacles_list:
+            x, y = obs.get('x', 0), obs.get('y', 0)
+            if model.add_obstacle((x, y)):
+                obstacles.append({'x': x, 'y': y})
+    
+    # Guardar posiciones de las estaciones de carga
+    charging_stations = []
+    for station in model.charging_stations:
+        charging_stations.append({'x': station.pos[0], 'y': station.pos[1]})
     
     # Preparar la respuesta con información de todos los robots
     robots_info = []
-    for i, robot in enumerate(model.robots):
+    for robot in model.robots:
         robots_info.append({
             'id': robot.unique_id,
             'start': {'x': robot.start[0], 'y': robot.start[1]},
             'goal': {'x': robot.goal[0], 'y': robot.goal[1]},
             'position': {'x': robot.pos[0], 'y': robot.pos[1]},
             'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path],
-            'color': robot.color
+            'color': robot.color,
+            'battery_level': robot.battery_level,
+            'max_battery': robot.max_battery,
+            'charging': robot.charging,
+            'battery_percentage': (robot.battery_level / robot.max_battery) * 100
         })
     
     return jsonify({
         'success': True,
         'grid_size': {'width': width, 'height': height},
-        'robots': robots_info
+        'robots': robots_info,
+        'obstacles': obstacles,
+        'charging_stations': charging_stations
     })
 
 @app.route('/step', methods=['POST'])
@@ -75,7 +98,13 @@ def step():
             'position': {'x': robot.pos[0], 'y': robot.pos[1]},
             'reached_goal': reached_goal,
             'steps_left': len(robot.path) - 1 if robot.path else 0,
-            'steps_taken': robot.steps_taken
+            'steps_taken': robot.steps_taken,
+            'battery_level': robot.battery_level,
+            'max_battery': robot.max_battery,
+            'charging': robot.charging,
+            'status': 'charging' if robot.charging else 'goal_reached' if robot.reached_goal else 'moving',
+            'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
+            'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]  # Incluir la ruta actualizada
         })
     
     return jsonify({
@@ -97,7 +126,7 @@ def add_obstacle():
     y = int(data.get('y', 0))
     
     # Añadir obstáculo (la función add_obstacle ya verifica si la posición es válida)
-    success = model.add_obstacle((x, y))
+    success = model.add_obstacle((x, y))  # Pasar como tupla
     
     if success:
         obstacles.append({'x': x, 'y': y})
@@ -124,7 +153,51 @@ def add_obstacle():
     else:
         return jsonify({
             'success': False,
-            'error': 'No se puede añadir obstáculo en la posición de un robot o su meta'
+            'error': 'No se puede añadir obstáculo en la posición especificada'
+        }), 400
+
+@app.route('/add_charging_station', methods=['POST'])
+def add_charging_station():
+    """Añade una estación de carga en la posición especificada"""
+    global model, charging_stations
+    
+    if model is None:
+        return jsonify({'error': 'Modelo no inicializado'}), 400
+    
+    data = request.json
+    x = int(data.get('x', 0))
+    y = int(data.get('y', 0))
+    charging_rate = float(data.get('charging_rate', 10))
+    
+    # Añadir estación de carga
+    success = model.add_charging_station((x, y))
+    
+    if success:
+        charging_stations.append({'x': x, 'y': y})
+        
+        # También actualizar rutas de robots que podrían estar buscando estaciones
+        robots_paths = []
+        for robot in model.robots:
+            if not robot.reached_goal and robot.battery_level < robot.max_battery * 0.3:  # Batería baja
+                # El robot puede recalcular su ruta para usar esta nueva estación
+                robot.nearest_charging_station = robot.find_nearest_charging_station()
+                if robot.nearest_charging_station:
+                    robot.path = robot.calculate_path_to_station(robot.nearest_charging_station)
+            
+            robots_paths.append({
+                'id': robot.unique_id,
+                'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
+            })
+            
+        return jsonify({
+            'success': True,
+            'charging_stations': charging_stations,
+            'robots_paths': robots_paths  # Incluir rutas actualizadas
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'error': 'No se puede añadir estación de carga en la posición especificada'
         }), 400
 
 @app.route('/add_robot', methods=['POST'])
@@ -142,8 +215,13 @@ def add_robot():
     goal_y = int(data.get('goal_y', 0))
     color = data.get('color', "blue")  # Color por defecto
     
-    start = (start_x, start_y)
-    goal = (goal_x, goal_y)
+    # Parámetros de batería
+    max_battery = float(data.get('max_battery', 100))
+    battery_level = float(data.get('battery_level', max_battery))
+    battery_drain_rate = float(data.get('battery_drain_rate', 1))
+    
+    start = (start_x, start_y)  # Usar tupla
+    goal = (goal_x, goal_y)  # Usar tupla
     
     # Verificar que las posiciones no estén ocupadas por obstáculos
     if model.has_obstacle(start) or model.has_obstacle(goal):
@@ -154,7 +232,12 @@ def add_robot():
     
     # Crear nuevo robot
     new_robot_id = len(model.robots) + 1
-    new_robot = RobotAgent(new_robot_id, model, start, goal, color)
+    new_robot = RobotAgent(
+        new_robot_id, model, start, goal, color,
+        max_battery=max_battery,
+        battery_drain_rate=battery_drain_rate,
+        battery_level=battery_level
+    )
     
     # Añadir a la lista de robots y al programador
     model.robots.append(new_robot)
@@ -165,7 +248,10 @@ def add_robot():
     robots_config.append({
         'start': start,
         'goal': goal,
-        'color': color
+        'color': color,
+        'max_battery': max_battery,
+        'battery_drain_rate': battery_drain_rate,
+        'battery_level': battery_level
     })
     
     if not new_robot.path:
@@ -182,14 +268,18 @@ def add_robot():
             'goal': {'x': goal[0], 'y': goal[1]},
             'position': {'x': start[0], 'y': start[1]},
             'path': [{'x': pos[0], 'y': pos[1]} for pos in new_robot.path],
-            'color': color
+            'color': color,
+            'battery_level': battery_level,
+            'max_battery': max_battery,
+            'charging': False,
+            'battery_percentage': (battery_level / max_battery) * 100
         }
     })
 
 @app.route('/get_state', methods=['GET'])
 def get_state():
     """Devuelve el estado actual del modelo"""
-    global model, obstacles
+    global model, obstacles, charging_stations
     
     if model is None:
         return jsonify({'error': 'Modelo no inicializado'}), 400
@@ -205,13 +295,18 @@ def get_state():
             'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path],
             'reached_goal': robot.reached_goal,
             'steps_taken': robot.steps_taken,
-            'color': robot.color
+            'color': robot.color,
+            'battery_level': robot.battery_level,
+            'max_battery': robot.max_battery,
+            'charging': robot.charging,
+            'battery_percentage': (robot.battery_level / robot.max_battery) * 100
         })
     
     return jsonify({
         'grid_size': {'width': model.grid.width, 'height': model.grid.height},
         'robots': robots_info,
         'obstacles': obstacles,
+        'charging_stations': charging_stations,
         'all_reached_goal': model.all_robots_reached_goal()
     })
 
@@ -221,14 +316,14 @@ if __name__ == '__main__':
     if not os.path.exists('templates'):
         os.makedirs('templates')
     
-    # Escribir el archivo de plantilla HTML
+    # Generar una plantilla HTML simple para visualizar en el navegador
     with open('templates/index.html', 'w') as f:
         f.write("""<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Robot Pathfinding Simulation</title>
+    <title>Simulación de Robots con Batería</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -294,18 +389,6 @@ if __name__ == '__main__':
             background-color: #cccccc;
             cursor: not-allowed;
         }
-        #resetBtn {
-            background-color: #f44336;
-        }
-        #resetBtn:hover {
-            background-color: #d32f2f;
-        }
-        #stepBtn {
-            background-color: #2196F3;
-        }
-        #stepBtn:hover {
-            background-color: #0b7dda;
-        }
         .grid-container {
             width: 100%;
             aspect-ratio: 1;
@@ -344,22 +427,21 @@ if __name__ == '__main__':
             z-index: 10;
             transition: all 0.5s ease;
         }
-        .robot-emoji {
-            font-size: 24px;
+        .charging-station {
+            background-color: #FFD700 !important;
+            border: 2px solid #DAA520;
+        }
+        .charging-station::before {
+            content: "⚡";
+            font-size: 1.2em;
         }
         .start {
             background-color: #2196F3 !important;
             color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
         }
         .goal {
             background-color: #4CAF50 !important;
             color: white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
         }
         .obstacle {
             background-color: #333 !important;
@@ -374,47 +456,33 @@ if __name__ == '__main__':
             background-color: #e9e9e9;
             border-radius: 4px;
         }
-        .robot-controls {
-            margin-top: 20px;
-            border: 1px solid #ddd;
-            padding: 15px;
-            border-radius: 4px;
+        .battery-indicator {
+            width: 30px;
+            height: 15px;
+            position: absolute;
+            border: 1px solid #333;
+            top: -20px;
+            left: 50%;
+            transform: translateX(-50%);
         }
-        .robot-list {
-            margin-top: 10px;
+        .battery-level {
+            height: 100%;
+            background-color: #4CAF50;
         }
-        .robot-item {
-            display: flex;
-            align-items: center;
-            margin-bottom: 5px;
-            padding: 5px;
-            border: 1px solid #eee;
-            border-radius: 4px;
+        .battery-low {
+            background-color: #ff5722;
         }
-        .robot-color {
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            margin-right: 10px;
-        }
-        .robot-info {
-            flex: 1;
-        }
-        .robot-status {
-            margin-left: 10px;
-            font-weight: bold;
-        }
-        .robot-status.completed {
-            color: green;
-        }
-        .robot-status.in-progress {
-            color: blue;
+        .charging-icon {
+            position: absolute;
+            top: -15px;
+            right: -15px;
+            font-size: 12px;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Simulación de Búsqueda de Ruta con Múltiples Robots</h1>
+        <h1>Simulación de Robots con Batería</h1>
         
         <div class="controls">
             <div class="control-group">
@@ -429,53 +497,61 @@ if __name__ == '__main__':
             </div>
         </div>
         
-        <div class="robot-controls">
-            <h3>Añadir Robot</h3>
-            <div class="controls">
-                <div class="control-group">
-                    <div class="control-item">
-                        <label for="startX">Inicio X:</label>
-                        <input type="number" id="startX" min="0" max="9" value="1">
-                    </div>
-                    <div class="control-item">
-                        <label for="startY">Inicio Y:</label>
-                        <input type="number" id="startY" min="0" max="9" value="1">
-                    </div>
+        <div class="controls">
+            <div class="control-group">
+                <h3>Añadir Robot</h3>
+                <div class="control-item">
+                    <label for="startX">Inicio X:</label>
+                    <input type="number" id="startX" min="0" max="9" value="1">
                 </div>
-                
-                <div class="control-group">
-                    <div class="control-item">
-                        <label for="goalX">Meta X:</label>
-                        <input type="number" id="goalX" min="0" max="9" value="8">
-                    </div>
-                    <div class="control-item">
-                        <label for="goalY">Meta Y:</label>
-                        <input type="number" id="goalY" min="0" max="9" value="8">
-                    </div>
+                <div class="control-item">
+                    <label for="startY">Inicio Y:</label>
+                    <input type="number" id="startY" min="0" max="9" value="1">
                 </div>
-                
-                <div class="control-group">
-                    <div class="control-item">
-                        <label for="robotColor">Color:</label>
-                        <select id="robotColor">
-                            <option value="red">Rojo</option>
-                            <option value="blue">Azul</option>
-                            <option value="green">Verde</option>
-                            <option value="purple">Morado</option>
-                            <option value="orange">Naranja</option>
-                            <option value="brown">Marrón</option>
-                            <option value="pink">Rosa</option>
-                            <option value="teal">Turquesa</option>
-                        </select>
-                    </div>
-                    <div class="control-item">
-                        <button id="addRobotBtn">Añadir Robot</button>
-                    </div>
+                <div class="control-item">
+                    <label for="goalX">Meta X:</label>
+                    <input type="number" id="goalX" min="0" max="9" value="8">
+                </div>
+                <div class="control-item">
+                    <label for="goalY">Meta Y:</label>
+                    <input type="number" id="goalY" min="0" max="9" value="8">
+                </div>
+                <div class="control-item">
+                    <label for="robotColor">Color:</label>
+                    <select id="robotColor">
+                        <option value="red">Rojo</option>
+                        <option value="blue">Azul</option>
+                        <option value="green">Verde</option>
+                        <option value="purple">Morado</option>
+                        <option value="orange">Naranja</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label for="maxBattery">Capacidad de Batería:</label>
+                    <input type="number" id="maxBattery" min="10" max="1000" value="100">
+                </div>
+                <div class="control-item">
+                    <label for="batteryDrainRate">Tasa de Descarga:</label>
+                    <input type="number" id="batteryDrainRate" min="0.1" max="10" step="0.1" value="1">
+                </div>
+                <div class="control-item">
+                    <button id="addRobotBtn">Añadir Robot</button>
                 </div>
             </div>
             
-            <div class="robot-list" id="robotList">
-                <!-- Aquí se añadirán los robots -->
+            <div class="control-group">
+                <h3>Añadir Estación de Carga</h3>
+                <div class="control-item">
+                    <label for="stationX">Posición X:</label>
+                    <input type="number" id="stationX" min="0" max="9" value="5">
+                </div>
+                <div class="control-item">
+                    <label for="stationY">Posición Y:</label>
+                    <input type="number" id="stationY" min="0" max="9" value="5">
+                </div>
+                <div class="control-item">
+                    <button id="addStationBtn">Añadir Estación</button>
+                </div>
             </div>
         </div>
         
@@ -488,7 +564,6 @@ if __name__ == '__main__':
         
         <div class="grid-container">
             <div id="grid"></div>
-            <!-- Los robots se añadirán dinámicamente aquí -->
             <div id="robots-container"></div>
         </div>
         
@@ -501,27 +576,30 @@ if __name__ == '__main__':
         let gridHeight = 10;
         let robots = [];
         let obstacles = [];
+        let chargingStations = [];
         let isRunning = false;
         let animationInterval = null;
         
         // Elementos DOM
         const gridElement = document.getElementById('grid');
         const robotsContainer = document.getElementById('robots-container');
-        const robotList = document.getElementById('robotList');
         const statusElement = document.getElementById('status');
         const initButton = document.getElementById('initBtn');
         const startButton = document.getElementById('startBtn');
         const stepButton = document.getElementById('stepBtn');
         const resetButton = document.getElementById('resetBtn');
         const addRobotButton = document.getElementById('addRobotBtn');
+        const addStationButton = document.getElementById('addStationBtn');
         
-        // Función para añadir un robot a la interfaz antes de inicializar
-        function addRobotToUI() {
+        // Función para añadir un robot
+        function addRobot() {
             const startX = parseInt(document.getElementById('startX').value);
             const startY = parseInt(document.getElementById('startY').value);
             const goalX = parseInt(document.getElementById('goalX').value);
             const goalY = parseInt(document.getElementById('goalY').value);
             const color = document.getElementById('robotColor').value;
+            const maxBattery = parseFloat(document.getElementById('maxBattery').value);
+            const batteryDrainRate = parseFloat(document.getElementById('batteryDrainRate').value);
             
             // Validar que las coordenadas estén dentro del grid
             if (startX >= gridWidth || startY >= gridHeight || 
@@ -532,63 +610,97 @@ if __name__ == '__main__':
                 return;
             }
             
-            const robotId = robots.length + 1;
-            const robot = {
-                id: robotId,
-                start: {x: startX, y: startY},
-                goal: {x: goalX, y: goalY},
-                position: {x: startX, y: startY},
-                color: color,
-                path: []
-            };
-            
-            robots.push(robot);
-            updateRobotList();
+            // Si el modelo ya está inicializado, añadir robot al backend
+            if (startButton.disabled === false) {
+                fetch('/add_robot', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        start_x: startX,
+                        start_y: startY,
+                        goal_x: goalX,
+                        goal_y: goalY,
+                        color: color,
+                        max_battery: maxBattery,
+                        battery_drain_rate: batteryDrainRate,
+                        battery_level: maxBattery
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        robots.push(data.robot);
+                        updateGrid();
+                    } else {
+                        alert(data.error || 'No se pudo añadir el robot');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error al comunicarse con el servidor');
+                });
+            } else {
+                // Si el modelo no está inicializado, solo añadirlo a la lista local
+                const robotId = robots.length + 1;
+                robots.push({
+                    id: robotId,
+                    start: {x: startX, y: startY},
+                    goal: {x: goalX, y: goalY},
+                    position: {x: startX, y: startY},
+                    color: color,
+                    max_battery: maxBattery,
+                    battery_drain_rate: batteryDrainRate,
+                    battery_level: maxBattery,
+                    path: []
+                });
+            }
         }
         
-        // Función para actualizar la lista de robots en la UI
-        function updateRobotList() {
-            robotList.innerHTML = '';
+        // Función para añadir una estación de carga
+        function addChargingStation() {
+            const x = parseInt(document.getElementById('stationX').value);
+            const y = parseInt(document.getElementById('stationY').value);
             
-            if (robots.length === 0) {
-                robotList.innerHTML = '<p>No hay robots añadidos. Añade al menos un robot para iniciar la simulación.</p>';
+            // Validar que las coordenadas estén dentro del grid
+            if (x >= gridWidth || y >= gridHeight || x < 0 || y < 0) {
+                alert('La posición debe estar dentro del grid');
                 return;
             }
             
-            robots.forEach((robot, index) => {
-                const robotItem = document.createElement('div');
-                robotItem.classList.add('robot-item');
-                
-                const colorDiv = document.createElement('div');
-                colorDiv.classList.add('robot-color');
-                colorDiv.style.backgroundColor = robot.color;
-                
-                const infoDiv = document.createElement('div');
-                infoDiv.classList.add('robot-info');
-                infoDiv.innerHTML = `Robot ${robot.id}: Inicio (${robot.start.x}, ${robot.start.y}) → Meta (${robot.goal.x}, ${robot.goal.y})`;
-                
-                const statusDiv = document.createElement('div');
-                statusDiv.classList.add('robot-status');
-                if (robot.reached_goal) {
-                    statusDiv.classList.add('completed');
-                    statusDiv.textContent = 'Completado';
-                } else {
-                    statusDiv.classList.add('in-progress');
-                    statusDiv.textContent = 'En progreso';
-                }
-                
-                robotItem.appendChild(colorDiv);
-                robotItem.appendChild(infoDiv);
-                
-                if (robot.steps_taken !== undefined) {
-                    robotItem.appendChild(statusDiv);
-                }
-                
-                robotList.appendChild(robotItem);
-            });
+            // Si el modelo ya está inicializado, añadir estación al backend
+            if (startButton.disabled === false) {
+                fetch('/add_charging_station', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        x: x,
+                        y: y
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        chargingStations = data.charging_stations;
+                        updateGrid();
+                    } else {
+                        alert(data.error || 'No se pudo añadir la estación de carga');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error al comunicarse con el servidor');
+                });
+            } else {
+                // Si el modelo no está inicializado, solo añadirlo a la lista local
+                chargingStations.push({x: x, y: y});
+            }
         }
         
-        // Inicializar el grid
+        // Función para inicializar el grid
         function initializeGrid() {
             // Obtener valores de los inputs
             gridWidth = parseInt(document.getElementById('gridWidth').value);
@@ -600,10 +712,59 @@ if __name__ == '__main__':
                 return;
             }
             
+            // Inicializar el modelo en el backend
+            fetch('/init', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    width: gridWidth,
+                    height: gridHeight,
+                    robots: robots.map(robot => ({
+                        start: [robot.start.x, robot.start.y],
+                        goal: [robot.goal.x, robot.goal.y],
+                        color: robot.color,
+                        max_battery: robot.max_battery,
+                        battery_drain_rate: robot.battery_drain_rate,
+                        battery_level: robot.battery_level
+                    })),
+                    charging_stations: chargingStations.map(station => [station.x, station.y])
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Actualizar información desde el backend
+                    robots = data.robots;
+                    chargingStations = data.charging_stations;
+                    obstacles = [];
+                    
+                    // Actualizar la UI
+                    updateGrid();
+                    updateStatus('Modelo inicializado. Listo para iniciar la simulación.');
+                    startButton.disabled = false;
+                    stepButton.disabled = false;
+                    resetButton.disabled = false;
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                updateStatus('Error al inicializar el modelo.');
+            });
+        }
+
+                // Reiniciar la simulación
+        function resetSimulation() {
+            stopSimulation();
+            initializeGrid();
+        }
+        
+        // Función para actualizar el grid
+        function updateGrid() {
             // Limpiar el grid actual
             gridElement.innerHTML = '';
             robotsContainer.innerHTML = '';
-            obstacles = [];
             
             // Configurar el estilo del grid
             gridElement.style.gridTemplateColumns = `repeat(${gridWidth}, 1fr)`;
@@ -617,22 +778,32 @@ if __name__ == '__main__':
                     cell.dataset.x = x;
                     cell.dataset.y = y;
                     
+                    // Verificar si es una estación de carga
+                    const isChargingStation = chargingStations.some(s => s.x === x && s.y === y);
+                    if (isChargingStation) {
+                        cell.classList.add('charging-station');
+                    }
+                    
                     // Marcar celdas de inicio y meta para cada robot
                     let isStartOrGoal = false;
                     for (const robot of robots) {
                         if (x === robot.start.x && y === robot.start.y) {
                             cell.classList.add('start');
                             cell.textContent = 'S' + robot.id;
-                            cell.style.backgroundColor = robot.color;
                             isStartOrGoal = true;
                             break;
                         } else if (x === robot.goal.x && y === robot.goal.y) {
                             cell.classList.add('goal');
                             cell.textContent = 'G' + robot.id;
-                            cell.style.backgroundColor = robot.color;
                             isStartOrGoal = true;
                             break;
                         }
+                    }
+                    
+                    // Verificar si es un obstáculo
+                    const isObstacle = obstacles.some(o => o.x === x && o.y === y);
+                    if (isObstacle) {
+                        cell.classList.add('obstacle');
                     }
                     
                     // Añadir evento de clic para agregar obstáculos
@@ -640,23 +811,30 @@ if __name__ == '__main__':
                         const cellX = parseInt(e.target.dataset.x);
                         const cellY = parseInt(e.target.dataset.y);
                         
-                        // No permitir obstáculos en posiciones de inicio, meta o robots
-                        let isRobotPos = false;
+                        // No permitir obstáculos en ciertas posiciones
+                        let isReservedPosition = false;
+                        
+                        // Verificar si es inicio o meta de algún robot
                         for (const robot of robots) {
                             if ((cellX === robot.start.x && cellY === robot.start.y) ||
                                 (cellX === robot.goal.x && cellY === robot.goal.y) ||
                                 (cellX === robot.position.x && cellY === robot.position.y)) {
-                                isRobotPos = true;
+                                isReservedPosition = true;
                                 break;
                             }
                         }
                         
-                        if (isRobotPos) {
+                        // Verificar si es una estación de carga
+                        if (chargingStations.some(s => s.x === cellX && s.y === cellY)) {
+                            isReservedPosition = true;
+                        }
+                        
+                        if (isReservedPosition) {
                             return;
                         }
                         
                         // Verificar si ya hay un obstáculo
-                        const isObstacle = obstacles.some(obs => obs.x === cellX && obs.y === cellY);
+                        const isObstacle = obstacles.some(o => o.x === cellX && o.y === cellY);
                         
                         if (!isObstacle) {
                             // Añadir obstáculo al backend
@@ -671,7 +849,6 @@ if __name__ == '__main__':
                             .then(data => {
                                 if (data.success) {
                                     // Actualizar UI
-                                    e.target.classList.add('obstacle');
                                     obstacles = data.obstacles;
                                     
                                     // Actualizar rutas de los robots
@@ -682,6 +859,7 @@ if __name__ == '__main__':
                                         }
                                     }
                                     
+                                    updateGrid();
                                     updatePaths();
                                 } else {
                                     alert(data.error || 'No se pudo añadir el obstáculo');
@@ -700,42 +878,40 @@ if __name__ == '__main__':
             
             // Crear elementos para los robots
             createRobotElements();
+            updatePaths();
+        }
+        
+        // Función para actualizar las rutas en el grid
+        function updatePaths() {
+            // Limpiar las rutas anteriores
+            document.querySelectorAll('.cell.path').forEach(cell => {
+                cell.classList.remove('path');
+            });
             
-            // Inicializar el modelo en el backend
-            fetch('/init', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    width: gridWidth,
-                    height: gridHeight,
-                    robots: robots.map(robot => ({
-                        start: [robot.start.x, robot.start.y],
-                        goal: [robot.goal.x, robot.goal.y],
-                        color: robot.color
-                    }))
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    // Actualizar información de los robots desde el backend
-                    robots = data.robots;
+            // Para cada robot, mostrar su ruta
+            robots.forEach(robot => {
+                if (!robot.path || robot.reached_goal) return;
+                
+                robot.path.forEach(pos => {
+                    // No mostrar el camino en inicio, meta o posición actual del robot
+                    if ((pos.x === robot.start.x && pos.y === robot.start.y) ||
+                        (pos.x === robot.goal.x && pos.y === robot.goal.y) ||
+                        (pos.x === robot.position.x && pos.y === robot.position.y)) {
+                        return;
+                    }
                     
-                    // Actualizar la UI
-                    updateRobotPositions();
-                    updatePaths();
-                    updateRobotList();
-                    updateStatus('Modelo inicializado. Listo para iniciar la simulación.');
-                    startButton.disabled = false;
-                    stepButton.disabled = false;
-                    resetButton.disabled = false;
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                updateStatus('Error al inicializar el modelo.');
+                    // Convertir coordenadas a índice de celda
+                    const cellIndex = pos.y * gridWidth + pos.x;
+                    const cell = gridElement.children[cellIndex];
+                    
+                    // Marcar la celda como parte del camino si no es un obstáculo o estación de carga
+                    if (cell && !cell.classList.contains('obstacle') && 
+                        !cell.classList.contains('charging-station') &&
+                        !cell.classList.contains('start') && 
+                        !cell.classList.contains('goal')) {
+                        cell.classList.add('path');
+                    }
+                });
             });
         }
         
@@ -747,101 +923,47 @@ if __name__ == '__main__':
             const cellHeight = gridElement.offsetHeight / gridHeight;
             
             robots.forEach(robot => {
+                // Crear el elemento del robot
                 const robotElement = document.createElement('div');
                 robotElement.id = `robot-${robot.id}`;
                 robotElement.classList.add('robot');
+                robotElement.style.width = `${cellWidth * 0.8}px`;
+                robotElement.style.height = `${cellHeight * 0.8}px`;
                 robotElement.style.backgroundColor = robot.color;
-                robotElement.style.color = getContrastColor(robot.color);
+                robotElement.style.left = `${robot.position.x * cellWidth + (cellWidth * 0.1)}px`;
+                robotElement.style.top = `${robot.position.y * cellHeight + (cellHeight * 0.1)}px`;
                 
-                const robotEmoji = document.createElement('span');
-                robotEmoji.classList.add('robot-emoji');
-                robotEmoji.textContent = '🤖';
+                // Texto del robot (ID)
+                robotElement.textContent = robot.id;
                 
-                robotElement.appendChild(robotEmoji);
-                robotsContainer.appendChild(robotElement);
-            });
-            
-            updateRobotPositions();
-        }
-        
-        // Obtener color de contraste para texto legible
-        function getContrastColor(hexColor) {
-            // Si es un nombre de color, convertirlo a hex
-            const tempElem = document.createElement('div');
-            tempElem.style.color = hexColor;
-            document.body.appendChild(tempElem);
-            const rgbColor = window.getComputedStyle(tempElem).color;
-            document.body.removeChild(tempElem);
-            
-            // Extraer componentes RGB
-            const rgbMatch = rgbColor.match(/^rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/i);
-            if (rgbMatch) {
-                const r = parseInt(rgbMatch[1]);
-                const g = parseInt(rgbMatch[2]);
-                const b = parseInt(rgbMatch[3]);
+                // Indicador de batería
+                const batteryIndicator = document.createElement('div');
+                batteryIndicator.classList.add('battery-indicator');
                 
-                // Calcular brillo según fórmula estándar
-                const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+                const batteryLevel = document.createElement('div');
+                batteryLevel.classList.add('battery-level');
                 
-                return brightness > 125 ? 'black' : 'white';
-            }
-            
-            return 'white';  // Default
-        }
-        
-        // Actualizar las posiciones de todos los robots en el UI
-        function updateRobotPositions() {
-            const cellWidth = gridElement.offsetWidth / gridWidth;
-            const cellHeight = gridElement.offsetHeight / gridHeight;
-            
-            robots.forEach(robot => {
-                const robotElement = document.getElementById(`robot-${robot.id}`);
-                if (robotElement) {
-                    robotElement.style.width = `${cellWidth * 0.8}px`;
-                    robotElement.style.height = `${cellHeight * 0.8}px`;
-                    robotElement.style.left = `${robot.position.x * cellWidth + (cellWidth * 0.1)}px`;
-                    robotElement.style.top = `${robot.position.y * cellHeight + (cellHeight * 0.1)}px`;
+                // Calcular porcentaje de batería
+                const batteryPercentage = (robot.battery_level / robot.max_battery) * 100;
+                batteryLevel.style.width = `${batteryPercentage}%`;
+                
+                // Cambiar color si batería baja
+                if (batteryPercentage < 30) {
+                    batteryLevel.classList.add('battery-low');
                 }
-            });
-        }
-        
-        // Actualizar caminos de todos los robots en el UI
-        function updatePaths() {
-            // Limpiar caminos anteriores
-            document.querySelectorAll('.cell.path').forEach(cell => {
-                cell.classList.remove('path');
-            });
-            
-            // Marcar las celdas de los nuevos caminos para cada robot
-            robots.forEach(robot => {
-                if (!robot.path) return;
                 
-                robot.path.forEach(pos => {
-                    // No marcar inicio, meta o posición actual del robot
-                    let isStartGoalOrRobotPos = false;
-                    
-                    for (const r of robots) {
-                        if ((pos.x === r.start.x && pos.y === r.start.y) ||
-                            (pos.x === r.goal.x && pos.y === r.goal.y) ||
-                            (pos.x === r.position.x && pos.y === r.position.y)) {
-                            isStartGoalOrRobotPos = true;
-                            break;
-                        }
-                    }
-                    
-                    if (isStartGoalOrRobotPos) {
-                        return;
-                    }
-                    
-                    const cellIndex = pos.y * gridWidth + pos.x;
-                    const cell = gridElement.children[cellIndex];
-                    if (cell && !cell.classList.contains('obstacle')) {
-                        cell.classList.add('path');
-                        // Podríamos establecer un color diferente para el camino de cada robot
-                        // cell.style.backgroundColor = robot.color;
-                        // cell.style.opacity = "0.3";
-                    }
-                });
+                batteryIndicator.appendChild(batteryLevel);
+                robotElement.appendChild(batteryIndicator);
+                
+                // Icono de carga si está cargando
+                if (robot.charging) {
+                    const chargingIcon = document.createElement('div');
+                    chargingIcon.classList.add('charging-icon');
+                    chargingIcon.textContent = '⚡';
+                    robotElement.appendChild(chargingIcon);
+                }
+                
+                robotsContainer.appendChild(robotElement);
             });
         }
         
@@ -868,19 +990,21 @@ if __name__ == '__main__':
                             robot.position = robotUpdate.position;
                             robot.reached_goal = robotUpdate.reached_goal;
                             robot.steps_taken = robotUpdate.steps_taken;
+                            robot.battery_level = robotUpdate.battery_level;
+                            robot.charging = robotUpdate.charging;
                         }
                     });
                     
                     // Actualizar la UI
-                    updateRobotPositions();
-                    updateRobotList();
+                    createRobotElements();
+                    updatePaths(); // Añadido: actualizar las rutas
                     
                     if (data.all_reached_goal) {
                         updateStatus('¡Todos los robots han alcanzado sus metas!');
                         stopSimulation();
                     } else {
                         const robotsInProgress = robots.filter(r => !r.reached_goal).length;
-                        updateStatus(`${robotsInProgress} robots aún en movimiento. ${robots.length - robotsInProgress} han llegado a la meta.`);
+                        updateStatus(`${robotsInProgress} robots en movimiento. ${robots.length - robotsInProgress} han llegado a la meta.`);
                     }
                 }
             })
@@ -932,78 +1056,20 @@ if __name__ == '__main__':
             }
         }
         
-        // Reiniciar la simulación
-        function resetSimulation() {
-            stopSimulation();
-            initializeGrid();
-        }
-        
-        // Añadir un robot a la simulación
-        function addRobot() {
-            if (isRunning) {
-                alert('Detén la simulación antes de añadir un robot');
-                return;
-            }
-            
-            const startX = parseInt(document.getElementById('startX').value);
-            const startY = parseInt(document.getElementById('startY').value);
-            const goalX = parseInt(document.getElementById('goalX').value);
-            const goalY = parseInt(document.getElementById('goalY').value);
-            const color = document.getElementById('robotColor').value;
-            
-            // Si el modelo ya está inicializado, añadir robot al backend
-            if (startButton.disabled === false) {
-                fetch('/add_robot', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        start_x: startX,
-                        start_y: startY,
-                        goal_x: goalX,
-                        goal_y: goalY,
-                        color: color
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        robots.push(data.robot);
-                        
-                        // Actualizar la UI
-                        initializeGrid();  // Esto redibuja todo el grid
-                    } else {
-                        alert(data.error || 'No se pudo añadir el robot');
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    alert('Error al comunicarse con el servidor');
-                });
-            } else {
-                // Si el modelo no está inicializado, solo añadirlo a la lista local
-                addRobotToUI();
-            }
-        }
-        
         // Event listeners para los botones
         initButton.addEventListener('click', initializeGrid);
         startButton.addEventListener('click', startSimulation);
         stepButton.addEventListener('click', step);
         resetButton.addEventListener('click', resetSimulation);
         addRobotButton.addEventListener('click', addRobot);
-        
-        // Actualizar tamaño de los robots cuando cambia el tamaño de la ventana
-        window.addEventListener('resize', () => {
-            updateRobotPositions();
-        });
+        addStationButton.addEventListener('click', addChargingStation);
         
         // Inicializar al cargar la página
         window.addEventListener('load', () => {
             // Añadir un robot por defecto
-            addRobotToUI();
-            updateRobotList();
+            addRobot();
+            // Añadir una estación de carga por defecto
+            addChargingStation();
         });
     </script>
 </body>
