@@ -316,34 +316,44 @@ def get_state():
 
 @app.route('/export_path_coordinates', methods=['GET'])
 def export_path_coordinates():
-    """Exporta solo las coordenadas de las rutas de todos los robots a un archivo de texto"""
+    """Exporta las coordenadas de las rutas de robots en un formato específico"""
     global model
     
     if model is None:
         return jsonify({'error': 'Modelo no inicializado'}), 400
     
-    # Crear contenido del archivo de texto con formato simple
     output = []
     
-    # Añadir información de cada robot
+    # Procesar cada robot
     for robot in model.robots:
-        # Formato de lista numerada
-        for i, pos in enumerate(robot.path):
-            output.append(f"{pos[0]},{pos[1]}")
+        # Añadir identificador del robot
+        
+        # Extraer coordenadas x e y por separado
+        x_coords = []
+        y_coords = []
+        
+        for pos in robot.path:
+            x_coords.append(str(pos[0]))
+            y_coords.append(str(pos[1]))
+        
+        # Agregar coordenadas en el formato requerido
+        output.append(",".join(x_coords))
+        output.append(",".join(y_coords))
+        output.append("")  # Línea en blanco entre robots
     
     # Generar nombre de archivo con timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"robot_paths_coordinates_{timestamp}.txt"
+    filename = f"TargetPositions_{timestamp}.txt"
     
-    # Crear un directorio temporal
+    # Crear archivo en directorio temporal
     temp_dir = tempfile.gettempdir()
     file_path = os.path.join(temp_dir, filename)
     
-    # Guardar el archivo en el directorio temporal
+    # Guardar el archivo
     with open(file_path, 'w') as f:
         f.write('\n'.join(output))
     
-    # Devolver el archivo temporal para descargar
+    # Devolver el archivo para descargar
     return send_file(file_path, as_attachment=True)
 
 if __name__ == '__main__':
