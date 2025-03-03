@@ -158,6 +158,13 @@
             right: -15px;
             font-size: 12px;
         }
+        
+        #exportCoordsBtn {
+            background-color: #9c27b0;  /* Color morado para diferenciarlo */
+        }
+        #exportCoordsBtn:hover {
+            background-color: #7b1fa2;
+        }
     </style>
 </head>
 <body>
@@ -240,6 +247,7 @@
             <button id="startBtn" disabled>Iniciar</button>
             <button id="stepBtn" disabled>Paso</button>
             <button id="resetBtn" disabled>Reiniciar</button>
+            <button id="exportCoordsBtn" disabled>Exportar Coordenadas</button>
         </div>
         
         <div class="grid-container">
@@ -268,8 +276,11 @@
         const startButton = document.getElementById('startBtn');
         const stepButton = document.getElementById('stepBtn');
         const resetButton = document.getElementById('resetBtn');
+        const exportCoordsButton = document.getElementById('exportCoordsBtn');
         const addRobotButton = document.getElementById('addRobotBtn');
         const addStationButton = document.getElementById('addStationBtn');
+
+        
         
         // Función para añadir un robot
         function addRobot() {
@@ -426,6 +437,7 @@
                     startButton.disabled = false;
                     stepButton.disabled = false;
                     resetButton.disabled = false;
+                    exportCoordsButton.disabled = false;
                 }
             })
             .catch(error => {
@@ -434,7 +446,7 @@
             });
         }
 
-                // Reiniciar la simulación
+        // Reiniciar la simulación
         function resetSimulation() {
             stopSimulation();
             initializeGrid();
@@ -672,6 +684,7 @@
                             robot.steps_taken = robotUpdate.steps_taken;
                             robot.battery_level = robotUpdate.battery_level;
                             robot.charging = robotUpdate.charging;
+                            robot.path = robotUpdate.path; // Actualizar la ruta
                         }
                     });
                     
@@ -741,6 +754,9 @@
         startButton.addEventListener('click', startSimulation);
         stepButton.addEventListener('click', step);
         resetButton.addEventListener('click', resetSimulation);
+        exportCoordsButton.addEventListener('click', () => {
+            window.location.href = '/export_path_coordinates';
+        });
         addRobotButton.addEventListener('click', addRobot);
         addStationButton.addEventListener('click', addChargingStation);
         

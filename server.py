@@ -1,4 +1,8 @@
-from flask import Flask, render_template, jsonify, request
+import os
+import time
+import tempfile
+import datetime
+from flask import Flask, render_template, jsonify, request, send_file
 from pathfinding_model import RobotAgent, ObstacleAgent, ChargingStation, PathFindingModel
 import json
 from flask_cors import CORS  # Para permitir conexiones desde Unity
@@ -310,13 +314,45 @@ def get_state():
         'all_reached_goal': model.all_robots_reached_goal()
     })
 
+@app.route('/export_path_coordinates', methods=['GET'])
+def export_path_coordinates():
+    """Exporta solo las coordenadas de las rutas de todos los robots a un archivo de texto"""
+    global model
+    
+    if model is None:
+        return jsonify({'error': 'Modelo no inicializado'}), 400
+    
+    # Crear contenido del archivo de texto con formato simple
+    output = []
+    
+    # Añadir información de cada robot
+    for robot in model.robots:
+        # Formato de lista numerada
+        for i, pos in enumerate(robot.path):
+            output.append(f"{pos[0]},{pos[1]}")
+    
+    # Generar nombre de archivo con timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"robot_paths_coordinates_{timestamp}.txt"
+    
+    # Crear un directorio temporal
+    temp_dir = tempfile.gettempdir()
+    file_path = os.path.join(temp_dir, filename)
+    
+    # Guardar el archivo en el directorio temporal
+    with open(file_path, 'w') as f:
+        f.write('\n'.join(output))
+    
+    # Devolver el archivo temporal para descargar
+    return send_file(file_path, as_attachment=True)
+
 if __name__ == '__main__':
     # Crear el directorio templates si no existe
     import os
     if not os.path.exists('templates'):
         os.makedirs('templates')
     
-    # Generar una plantilla HTML simple para visualizar en el navegador
+    # Modificar el HTML para agregar funcionalidad al botón de exportar
     with open('templates/index.html', 'w') as f:
         f.write("""<!DOCTYPE html>
 <html lang="es">
@@ -478,6 +514,13 @@ if __name__ == '__main__':
             right: -15px;
             font-size: 12px;
         }
+        
+        #exportCoordsBtn {
+            background-color: #9c27b0;  /* Color morado para diferenciarlo */
+        }
+        #exportCoordsBtn:hover {
+            background-color: #7b1fa2;
+        }
     </style>
 </head>
 <body>
@@ -560,6 +603,7 @@ if __name__ == '__main__':
             <button id="startBtn" disabled>Iniciar</button>
             <button id="stepBtn" disabled>Paso</button>
             <button id="resetBtn" disabled>Reiniciar</button>
+            <button id="exportCoordsBtn" disabled>Exportar Coordenadas</button>
         </div>
         
         <div class="grid-container">
@@ -588,8 +632,11 @@ if __name__ == '__main__':
         const startButton = document.getElementById('startBtn');
         const stepButton = document.getElementById('stepBtn');
         const resetButton = document.getElementById('resetBtn');
+        const exportCoordsButton = document.getElementById('exportCoordsBtn');
         const addRobotButton = document.getElementById('addRobotBtn');
         const addStationButton = document.getElementById('addStationBtn');
+
+        
         
         // Función para añadir un robot
         function addRobot() {
@@ -746,6 +793,7 @@ if __name__ == '__main__':
                     startButton.disabled = false;
                     stepButton.disabled = false;
                     resetButton.disabled = false;
+                    exportCoordsButton.disabled = false;
                 }
             })
             .catch(error => {
@@ -754,7 +802,7 @@ if __name__ == '__main__':
             });
         }
 
-                // Reiniciar la simulación
+        // Reiniciar la simulación
         function resetSimulation() {
             stopSimulation();
             initializeGrid();
@@ -992,6 +1040,7 @@ if __name__ == '__main__':
                             robot.steps_taken = robotUpdate.steps_taken;
                             robot.battery_level = robotUpdate.battery_level;
                             robot.charging = robotUpdate.charging;
+                            robot.path = robotUpdate.path; // Actualizar la ruta
                         }
                     });
                     
@@ -1061,6 +1110,9 @@ if __name__ == '__main__':
         startButton.addEventListener('click', startSimulation);
         stepButton.addEventListener('click', step);
         resetButton.addEventListener('click', resetSimulation);
+        exportCoordsButton.addEventListener('click', () => {
+            window.location.href = '/export_path_coordinates';
+        });
         addRobotButton.addEventListener('click', addRobot);
         addStationButton.addEventListener('click', addChargingStation);
         
