@@ -12,7 +12,7 @@
             background-color: #f5f5f5;
         }
         .container {
-            max-width: 1200px;
+            max-width: 1380px;
             margin: 0 auto;
             background-color: white;
             padding: 20px;
@@ -77,6 +77,7 @@
             background-color: #f9f9f9;
             border: 1px solid #ddd;
             overflow: hidden;
+            max-height: 900px;
         }
         #grid {
             width: 100%;
@@ -93,6 +94,8 @@
             align-items: center;
             justify-content: center;
             transition: background-color 0.3s;
+            font-size: 10px;
+            color: #999;
         }
         .cell:hover {
             background-color: #f0f0f0;
@@ -165,6 +168,19 @@
         #exportCoordsBtn:hover {
             background-color: #7b1fa2;
         }
+        
+        /* Estilos para el origen centrado */
+        .x-axis {
+            border-top: 2px solid rgba(0,0,255,0.5) !important;
+        }
+        .y-axis {
+            border-left: 2px solid rgba(0,0,255,0.5) !important;
+        }
+        .origin {
+            background-color: rgba(0,0,255,0.1) !important;
+            font-weight: bold;
+            color: #000 !important;
+        }
     </style>
 </head>
 <body>
@@ -175,11 +191,11 @@
             <div class="control-group">
                 <div class="control-item">
                     <label for="gridWidth">Ancho del Grid:</label>
-                    <input type="number" id="gridWidth" min="5" max="20" value="10">
+                    <input type="number" id="gridWidth" min="5" max="20" value="14">
                 </div>
                 <div class="control-item">
                     <label for="gridHeight">Alto del Grid:</label>
-                    <input type="number" id="gridHeight" min="5" max="20" value="10">
+                    <input type="number" id="gridHeight" min="5" max="20" value="6">
                 </div>
             </div>
         </div>
@@ -189,19 +205,19 @@
                 <h3>Añadir Robot</h3>
                 <div class="control-item">
                     <label for="startX">Inicio X:</label>
-                    <input type="number" id="startX" min="0" max="9" value="1">
+                    <input type="number" id="startX" min="-6" max="5" value="0">
                 </div>
                 <div class="control-item">
                     <label for="startY">Inicio Y:</label>
-                    <input type="number" id="startY" min="0" max="9" value="1">
+                    <input type="number" id="startY" min="-4" max="3" value="0">
                 </div>
                 <div class="control-item">
                     <label for="goalX">Meta X:</label>
-                    <input type="number" id="goalX" min="0" max="9" value="8">
+                    <input type="number" id="goalX" min="-6" max="5" value="3">
                 </div>
                 <div class="control-item">
                     <label for="goalY">Meta Y:</label>
-                    <input type="number" id="goalY" min="0" max="9" value="8">
+                    <input type="number" id="goalY" min="-4" max="3" value="3">
                 </div>
                 <div class="control-item">
                     <label for="robotColor">Color:</label>
@@ -218,10 +234,6 @@
                     <input type="number" id="maxBattery" min="10" max="1000" value="100">
                 </div>
                 <div class="control-item">
-                    <label for="batteryDrainRate">Tasa de Descarga:</label>
-                    <input type="number" id="batteryDrainRate" min="0.1" max="10" step="0.1" value="1">
-                </div>
-                <div class="control-item">
                     <button id="addRobotBtn">Añadir Robot</button>
                 </div>
             </div>
@@ -230,11 +242,11 @@
                 <h3>Añadir Estación de Carga</h3>
                 <div class="control-item">
                     <label for="stationX">Posición X:</label>
-                    <input type="number" id="stationX" min="0" max="9" value="5">
+                    <input type="number" id="stationX" min="-6" max="5" value="0">
                 </div>
                 <div class="control-item">
                     <label for="stationY">Posición Y:</label>
-                    <input type="number" id="stationY" min="0" max="9" value="5">
+                    <input type="number" id="stationY" min="-4" max="3" value="0">
                 </div>
                 <div class="control-item">
                     <button id="addStationBtn">Añadir Estación</button>
@@ -248,6 +260,22 @@
             <button id="stepBtn" disabled>Paso</button>
             <button id="resetBtn" disabled>Reiniciar</button>
             <button id="exportCoordsBtn" disabled>Exportar Coordenadas</button>
+            <button id="loadFilesBtn">Cargar desde archivos</button>
+            <a href="/visualize_plot"><button>Ver Visualización</button></a>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <h3>Cambiar Objetivo</h3>
+                <div class="control-item">
+                    <label for="robotIdSelect">Robot:</label>
+                    <select id="robotIdSelect">
+                        <option value="1">Robot 1</option>
+                        <option value="2">Robot 2</option>
+                    </select>
+                    <button id="nextTargetBtn">Siguiente Objetivo</button>
+                </div>
+            </div>
         </div>
         
         <div class="grid-container">
@@ -260,8 +288,8 @@
 
     <script>
         // Variables globales
-        let gridWidth = 10;
-        let gridHeight = 10;
+        let gridWidth = 14;
+        let gridHeight = 6;
         let robots = [];
         let obstacles = [];
         let chargingStations = [];
@@ -277,17 +305,45 @@
         const stepButton = document.getElementById('stepBtn');
         const resetButton = document.getElementById('resetBtn');
         const exportCoordsButton = document.getElementById('exportCoordsBtn');
+        const loadFilesBtn = document.getElementById('loadFilesBtn');
         const addRobotButton = document.getElementById('addRobotBtn');
         const addStationButton = document.getElementById('addStationBtn');
+        const nextTargetButton = document.getElementById('nextTargetBtn');
 
-        
+        // Funciones de conversión de coordenadas
+        function gridToCenter(x, y) {
+            // Convierte coordenadas de grid a coordenadas centradas
+            return {
+                x: x - Math.floor(gridWidth / 2),
+                y: Math.floor(gridHeight / 2) - y
+            };
+        }
+
+        function centerToGrid(x, y) {
+            // Convierte coordenadas centradas a coordenadas de grid
+            return {
+                x: x + Math.floor(gridWidth / 2),
+                y: Math.floor(gridHeight / 2) - y
+            };
+        }
         
         // Función para añadir un robot
         function addRobot() {
-            const startX = parseInt(document.getElementById('startX').value);
-            const startY = parseInt(document.getElementById('startY').value);
-            const goalX = parseInt(document.getElementById('goalX').value);
-            const goalY = parseInt(document.getElementById('goalY').value);
+            // Obtener valores centrados desde el formulario
+            const centeredStartX = parseInt(document.getElementById('startX').value);
+            const centeredStartY = parseInt(document.getElementById('startY').value);
+            const centeredGoalX = parseInt(document.getElementById('goalX').value);
+            const centeredGoalY = parseInt(document.getElementById('goalY').value);
+            
+            // Convertir a coordenadas de grid
+            const gridStart = centerToGrid(centeredStartX, centeredStartY);
+            const gridGoal = centerToGrid(centeredGoalX, centeredGoalY);
+            
+            const startX = gridStart.x;
+            const startY = gridStart.y;
+            const goalX = gridGoal.x;
+            const goalY = gridGoal.y;
+            
             const color = document.getElementById('robotColor').value;
             const maxBattery = parseFloat(document.getElementById('maxBattery').value);
             const batteryDrainRate = parseFloat(document.getElementById('batteryDrainRate').value);
@@ -351,8 +407,14 @@
         
         // Función para añadir una estación de carga
         function addChargingStation() {
-            const x = parseInt(document.getElementById('stationX').value);
-            const y = parseInt(document.getElementById('stationY').value);
+            // Obtener valores centrados
+            const centeredX = parseInt(document.getElementById('stationX').value);
+            const centeredY = parseInt(document.getElementById('stationY').value);
+            
+            // Convertir a coordenadas del grid
+            const gridPos = centerToGrid(centeredX, centeredY);
+            const x = gridPos.x;
+            const y = gridPos.y;
             
             // Validar que las coordenadas estén dentro del grid
             if (x >= gridWidth || y >= gridHeight || x < 0 || y < 0) {
@@ -396,6 +458,21 @@
             // Obtener valores de los inputs
             gridWidth = parseInt(document.getElementById('gridWidth').value);
             gridHeight = parseInt(document.getElementById('gridHeight').value);
+            
+            // Actualizar límites en los campos de entrada
+            document.getElementById('startX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('startX').max = Math.floor(gridWidth / 2) - 1;
+            document.getElementById('goalX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('goalX').max = Math.floor(gridWidth / 2) - 1;
+            document.getElementById('stationX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('stationX').max = Math.floor(gridWidth / 2) - 1;
+            
+            document.getElementById('startY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('startY').max = Math.floor(gridHeight / 2) - 1;
+            document.getElementById('goalY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('goalY').max = Math.floor(gridHeight / 2) - 1;
+            document.getElementById('stationY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('stationY').max = Math.floor(gridHeight / 2) - 1;
             
             // Validar que hay al menos un robot
             if (robots.length === 0) {
@@ -462,6 +539,10 @@
             gridElement.style.gridTemplateColumns = `repeat(${gridWidth}, 1fr)`;
             gridElement.style.gridTemplateRows = `repeat(${gridHeight}, 1fr)`;
             
+            // Calcular coordenadas del centro
+            const centerX = Math.floor(gridWidth / 2);
+            const centerY = Math.floor(gridHeight / 2);
+            
             // Crear las celdas
             for (let y = 0; y < gridHeight; y++) {
                 for (let x = 0; x < gridWidth; x++) {
@@ -469,6 +550,27 @@
                     cell.classList.add('cell');
                     cell.dataset.x = x;
                     cell.dataset.y = y;
+                    
+                    // Convertir y mostrar coordenadas centradas
+                    const centered = gridToCenter(x, y);
+                    cell.dataset.centeredX = centered.x;
+                    cell.dataset.centeredY = centered.y;
+                    
+                    // Mostrar coordenadas centradas en cada celda
+                    if (centered.x === 0 && centered.y === 0) {
+                        cell.textContent = "(0,0)";
+                        cell.classList.add('origin');
+                    } else {
+                        cell.textContent = `(${centered.x},${centered.y})`;
+                    }
+                    
+                    // Marcar los ejes
+                    if (centered.y === 0) {
+                        cell.classList.add('x-axis');
+                    }
+                    if (centered.x === 0) {
+                        cell.classList.add('y-axis');
+                    }
                     
                     // Verificar si es una estación de carga
                     const isChargingStation = chargingStations.some(s => s.x === x && s.y === y);
@@ -749,6 +851,86 @@
             }
         }
         
+        // Cargar desde archivos
+        function loadFromFiles() {
+            // Reiniciar la simulación
+            stopSimulation();
+            
+            // Limpiar robots y obstáculos actuales
+            robots = [];
+            obstacles = [];
+            chargingStations = [];
+            
+            // Inicializar con carga desde archivos
+            fetch('/init', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    width: gridWidth,
+                    height: gridHeight,
+                    load_from_files: true
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Actualizar información desde el backend
+                    robots = data.robots;
+                    obstacles = data.obstacles;
+                    chargingStations = data.charging_stations;
+                    
+                    // Actualizar la UI
+                    updateGrid();
+                    updateStatus('Datos cargados desde archivos. Listo para iniciar la simulación.');
+                    startButton.disabled = false;
+                    stepButton.disabled = false;
+                    resetButton.disabled = false;
+                    exportCoordsButton.disabled = false;
+                } else {
+                    alert(data.error || 'Error al cargar datos desde archivos');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                updateStatus('Error al cargar datos desde archivos.');
+            });
+        }
+        
+        // Cambiar al siguiente objetivo
+        function nextTarget() {
+            const robotId = parseInt(document.getElementById('robotIdSelect').value);
+            
+            fetch('/next_target', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ robot_id: robotId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Actualizar la UI para mostrar el nuevo objetivo
+                    const robot = robots.find(r => r.id === robotId);
+                    if (robot) {
+                        robot.goal = data.new_target;
+                        robot.path = data.path;
+                        robot.reached_goal = false;
+                        updateGrid();
+                        updateStatus(`Robot ${robotId} redirigido a nuevo objetivo.`);
+                    }
+                } else {
+                    alert(data.error || 'Error al cambiar de objetivo');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error al comunicarse con el servidor');
+            });
+        }
+        
         // Event listeners para los botones
         initButton.addEventListener('click', initializeGrid);
         startButton.addEventListener('click', startSimulation);
@@ -757,14 +939,38 @@
         exportCoordsButton.addEventListener('click', () => {
             window.location.href = '/export_path_coordinates';
         });
+        loadFilesBtn.addEventListener('click', loadFromFiles);
         addRobotButton.addEventListener('click', addRobot);
         addStationButton.addEventListener('click', addChargingStation);
+        nextTargetButton.addEventListener('click', nextTarget);
         
         // Inicializar al cargar la página
         window.addEventListener('load', () => {
-            // Añadir un robot por defecto
+            // Actualizar límites en los campos de entrada basados en el tamaño inicial del grid
+            document.getElementById('startX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('startX').max = Math.floor(gridWidth / 2) - 1;
+            document.getElementById('goalX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('goalX').max = Math.floor(gridWidth / 2) - 1;
+            document.getElementById('stationX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('stationX').max = Math.floor(gridWidth / 2) - 1;
+            
+            document.getElementById('startY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('startY').max = Math.floor(gridHeight / 2) - 1;
+            document.getElementById('goalY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('goalY').max = Math.floor(gridHeight / 2) - 1;
+            document.getElementById('stationY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('stationY').max = Math.floor(gridHeight / 2) - 1;
+            
+            // Añadir un robot por defecto en el origen
+            document.getElementById('startX').value = 0;
+            document.getElementById('startY').value = 0;
+            document.getElementById('goalX').value = 3;
+            document.getElementById('goalY').value = 3;
             addRobot();
+            
             // Añadir una estación de carga por defecto
+            document.getElementById('stationX').value = -3;
+            document.getElementById('stationY').value = -2;
             addChargingStation();
         });
     </script>

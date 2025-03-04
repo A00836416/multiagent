@@ -6,6 +6,22 @@ from flask import Flask, render_template, jsonify, request, send_file
 from pathfinding_model import RobotAgent, ObstacleAgent, ChargingStation, PathFindingModel
 import json
 from flask_cors import CORS  # Para permitir conexiones desde Unity
+from coordinate_utils import CoordinateConverter  # Importar el conversor de coordenadas
+from matplotlib_visualization import generate_plot
+
+# Configuración para la conversión de coordenadas
+GRID_WIDTH = 14
+GRID_HEIGHT = 6
+SCALE_FACTOR = 5  # Factor de escala para convertir coordenadas decimales a celdas
+
+# Funciones para convertir entre coordenadas del grid y coordenadas centradas
+def grid_to_centered(x, y, width, height):
+    """Convierte coordenadas del grid (0,0 en esquina superior izquierda) a coordenadas centradas"""
+    return x - width // 2, height // 2 - y
+
+def centered_to_grid(x, y, width, height):
+    """Convierte coordenadas centradas a coordenadas del grid (0,0 en esquina superior izquierda)"""
+    return x + width // 2, height // 2 - y
 
 app = Flask(__name__)
 CORS(app)  # Habilitar CORS para todas las rutas
@@ -15,6 +31,93 @@ model = None
 obstacles = []
 charging_stations = []
 robots_config = []
+
+# Variables globales para seguimiento de objetivos
+current_target_indices = [0, 0]  # Índice actual para cada robot
+target_positions_global = []  # Todos los objetivos cargados
+
+# Función para cargar datos desde archivos TXT
+def load_data_from_files():
+    global target_positions_global, current_target_indices
+    
+    # Ruta a los archivos
+    files_path = "Mapa_Grupo_101_2/"
+    
+    # Inicializar el conversor de coordenadas
+    converter = CoordinateConverter(GRID_WIDTH, GRID_HEIGHT, SCALE_FACTOR)
+    
+    # Reiniciar índices de objetivos
+    current_target_indices = [0, 0]
+    
+    # Cargar posiciones iniciales de robots
+    robots = []
+    try:
+        robot_positions = converter.load_robot_positions(files_path + 'InitialPositions.txt')
+        
+        # Crear dos robots con las posiciones iniciales
+        for i, (grid_x, grid_y) in enumerate(robot_positions):
+            robots.append({
+                'start': [grid_x, grid_y],
+                'goal': [0, 0],  # Valor temporal
+                'color': 'red' if i == 0 else 'blue',
+                'max_battery': 100,
+                'battery_drain_rate': 1,
+                'battery_level': 100
+            })
+        
+        # Cargar posiciones objetivo
+        all_target_positions = converter.load_target_positions(files_path + 'TargetPositions.txt')
+        
+        # Dividir los objetivos entre los robots
+        # Aquí asumimos que la primera línea del archivo corresponde al robot 1 y la segunda al robot 2
+        # Según el formato descrito: x1,x2,x3,... / y1,y2,y3,...
+        
+        # Preparar los objetivos como tuplas (x, y)
+        target_positions = all_target_positions
+        
+        # Organizar los objetivos por robot
+        # Según la imagen del TargetPositions.txt, parece que cada línea corresponde a un robot
+        target_positions_global = [
+            target_positions[:len(target_positions)//2],  # Primera mitad para robot 1
+            target_positions[len(target_positions)//2:]   # Segunda mitad para robot 2
+        ]
+        
+        # Asignar el primer objetivo a cada robot
+        if len(robots) > 0 and len(target_positions_global) > 0 and len(target_positions_global[0]) > 0:
+            robots[0]['goal'] = list(target_positions_global[0][0])
+            
+        if len(robots) > 1 and len(target_positions_global) > 1 and len(target_positions_global[1]) > 0:
+            robots[1]['goal'] = list(target_positions_global[1][0])
+            
+        print(f"Robots configurados: {len(robots)}")
+        print(f"Objetivos para Robot 1: {len(target_positions_global[0])}")
+        print(f"Objetivos para Robot 2: {len(target_positions_global[1])}")
+        
+    except Exception as e:
+        print(f"Error al cargar posiciones de robots: {e}")
+        target_positions_global = [[], []]
+    
+    # Cargar obstáculos
+    obstacles = []
+    for i in range(1, 7):  # Obstáculos del 1 al 6
+        try:
+            filename = files_path + f'Obstacle_{i}.txt'
+            obstacle_corners = converter.load_obstacles(filename)
+            
+            # Para cada obstáculo, solo añadimos sus esquinas
+            # No generamos todas las celdas interiores
+            for corner in obstacle_corners:
+                obstacles.append({'x': corner[0], 'y': corner[1]})
+                
+            print(f"Obstáculo {i} cargado: {len(obstacle_corners)} esquinas")
+            
+        except Exception as e:
+            print(f"Error al cargar {filename}: {e}")
+    
+    # Estaciones de carga (opcional)
+    charging_stations = []
+    
+    return robots, obstacles, charging_stations
 
 @app.route('/')
 def index():
@@ -27,11 +130,16 @@ def initialize():
     global model, obstacles, charging_stations, robots_config
     
     data = request.json
-    width = int(data.get('width', 10))
-    height = int(data.get('height', 10))
-    robots_config = data.get('robots', [])
-    charging_stations_config = data.get('charging_stations', [])
-    obstacles_list = data.get('obstacles', [])  
+    width = int(data.get('width', GRID_WIDTH))
+    height = int(data.get('height', GRID_HEIGHT))
+    
+    # Verificar si se debe cargar desde archivos
+    if data.get('load_from_files', False):
+        robots_config, obstacles_list, stations_list = load_data_from_files()
+    else:
+        robots_config = data.get('robots', [])
+        obstacles_list = data.get('obstacles', [])  
+        stations_list = data.get('charging_stations', [])
     
     # Asegurar que todos los robots tengan configuración de inicio y meta
     for i, robot in enumerate(robots_config):
@@ -39,7 +147,7 @@ def initialize():
             return jsonify({'error': f'Configuración incompleta para el robot {i+1}'}), 400
     
     # Inicializar el modelo con múltiples robots y estaciones de carga
-    model = PathFindingModel(width, height, robots_config, charging_stations_config)
+    model = PathFindingModel(width, height, robots_config, stations_list)
     
     # Añadir obstáculos si se proporcionan
     obstacles = []
@@ -76,6 +184,51 @@ def initialize():
         'robots': robots_info,
         'obstacles': obstacles,
         'charging_stations': charging_stations
+    })
+
+@app.route('/visualize_plot')
+def visualize_plot():
+    img_data = generate_plot()
+    return render_template('visualize.html', img_data=img_data)
+
+@app.route('/next_target', methods=['POST'])
+def next_target():
+    """Avanza al siguiente objetivo para el robot especificado"""
+    global model, current_target_indices, target_positions_global
+    
+    if model is None:
+        return jsonify({'error': 'Modelo no inicializado'}), 400
+    
+    data = request.json
+    robot_id = int(data.get('robot_id', 0))
+    
+    # Verificar que el robot existe
+    if robot_id <= 0 or robot_id > len(model.robots):
+        return jsonify({'error': f'Robot {robot_id} no existe'}), 400
+    
+    robot_index = robot_id - 1  # Convertir ID a índice (0-based)
+    
+    # Incrementar el índice de objetivo para este robot
+    current_target_indices[robot_index] += 1
+    
+    # Verificar que hay más objetivos disponibles
+    if robot_index >= len(target_positions_global) or current_target_indices[robot_index] >= len(target_positions_global[robot_index]):
+        return jsonify({'error': 'No hay más objetivos disponibles para este robot'}), 400
+    
+    # Obtener el nuevo objetivo
+    new_target = target_positions_global[robot_index][current_target_indices[robot_index]]
+    
+    # Actualizar el objetivo del robot
+    robot = model.robots[robot_index]
+    robot.goal = new_target
+    robot.path = robot.astar(robot.pos, robot.goal)
+    robot.reached_goal = False
+    
+    return jsonify({
+        'success': True,
+        'robot_id': robot_id,
+        'new_target': {'x': new_target[0], 'y': new_target[1]},
+        'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
     })
 
 @app.route('/step', methods=['POST'])
@@ -316,7 +469,7 @@ def get_state():
 
 @app.route('/export_path_coordinates', methods=['GET'])
 def export_path_coordinates():
-    """Exporta las coordenadas de las rutas de robots en un formato específico"""
+    """Exporta las coordenadas de las rutas de robots en un formato específico con origen centrado"""
     global model
     
     if model is None:
@@ -324,17 +477,24 @@ def export_path_coordinates():
     
     output = []
     
+    # Dimensiones del grid para las conversiones
+    width = model.grid.width
+    height = model.grid.height
+    
+    # Inicializar el conversor con el mismo factor de escala
+    converter = CoordinateConverter(width, height, SCALE_FACTOR)
+    
     # Procesar cada robot
     for robot in model.robots:
-        # Añadir identificador del robot
-        
-        # Extraer coordenadas x e y por separado
+        # Extraer coordenadas x e y por separado y convertirlas a sistema centrado
         x_coords = []
         y_coords = []
         
         for pos in robot.path:
-            x_coords.append(str(pos[0]))
-            y_coords.append(str(pos[1]))
+            # Convertir de coordenadas de grid a coordenadas del mundo
+            world_x, world_y = converter.grid_to_world(pos[0], pos[1])
+            x_coords.append(str(round(world_x, 6)))  # Redondear a 6 decimales
+            y_coords.append(str(round(world_y, 6)))  # Redondear a 6 decimales
         
         # Agregar coordenadas en el formato requerido
         output.append(",".join(x_coords))
@@ -378,7 +538,7 @@ if __name__ == '__main__':
             background-color: #f5f5f5;
         }
         .container {
-            max-width: 1200px;
+            max-width: 1380px;
             margin: 0 auto;
             background-color: white;
             padding: 20px;
@@ -443,6 +603,7 @@ if __name__ == '__main__':
             background-color: #f9f9f9;
             border: 1px solid #ddd;
             overflow: hidden;
+            max-height: 900px;
         }
         #grid {
             width: 100%;
@@ -459,6 +620,8 @@ if __name__ == '__main__':
             align-items: center;
             justify-content: center;
             transition: background-color 0.3s;
+            font-size: 10px;
+            color: #999;
         }
         .cell:hover {
             background-color: #f0f0f0;
@@ -531,6 +694,19 @@ if __name__ == '__main__':
         #exportCoordsBtn:hover {
             background-color: #7b1fa2;
         }
+        
+        /* Estilos para el origen centrado */
+        .x-axis {
+            border-top: 2px solid rgba(0,0,255,0.5) !important;
+        }
+        .y-axis {
+            border-left: 2px solid rgba(0,0,255,0.5) !important;
+        }
+        .origin {
+            background-color: rgba(0,0,255,0.1) !important;
+            font-weight: bold;
+            color: #000 !important;
+        }
     </style>
 </head>
 <body>
@@ -541,11 +717,11 @@ if __name__ == '__main__':
             <div class="control-group">
                 <div class="control-item">
                     <label for="gridWidth">Ancho del Grid:</label>
-                    <input type="number" id="gridWidth" min="5" max="20" value="10">
+                    <input type="number" id="gridWidth" min="5" max="20" value="14">
                 </div>
                 <div class="control-item">
                     <label for="gridHeight">Alto del Grid:</label>
-                    <input type="number" id="gridHeight" min="5" max="20" value="10">
+                    <input type="number" id="gridHeight" min="5" max="20" value="6">
                 </div>
             </div>
         </div>
@@ -555,19 +731,19 @@ if __name__ == '__main__':
                 <h3>Añadir Robot</h3>
                 <div class="control-item">
                     <label for="startX">Inicio X:</label>
-                    <input type="number" id="startX" min="0" max="9" value="1">
+                    <input type="number" id="startX" min="-6" max="5" value="0">
                 </div>
                 <div class="control-item">
                     <label for="startY">Inicio Y:</label>
-                    <input type="number" id="startY" min="0" max="9" value="1">
+                    <input type="number" id="startY" min="-4" max="3" value="0">
                 </div>
                 <div class="control-item">
                     <label for="goalX">Meta X:</label>
-                    <input type="number" id="goalX" min="0" max="9" value="8">
+                    <input type="number" id="goalX" min="-6" max="5" value="3">
                 </div>
                 <div class="control-item">
                     <label for="goalY">Meta Y:</label>
-                    <input type="number" id="goalY" min="0" max="9" value="8">
+                    <input type="number" id="goalY" min="-4" max="3" value="3">
                 </div>
                 <div class="control-item">
                     <label for="robotColor">Color:</label>
@@ -584,10 +760,6 @@ if __name__ == '__main__':
                     <input type="number" id="maxBattery" min="10" max="1000" value="100">
                 </div>
                 <div class="control-item">
-                    <label for="batteryDrainRate">Tasa de Descarga:</label>
-                    <input type="number" id="batteryDrainRate" min="0.1" max="10" step="0.1" value="1">
-                </div>
-                <div class="control-item">
                     <button id="addRobotBtn">Añadir Robot</button>
                 </div>
             </div>
@@ -596,11 +768,11 @@ if __name__ == '__main__':
                 <h3>Añadir Estación de Carga</h3>
                 <div class="control-item">
                     <label for="stationX">Posición X:</label>
-                    <input type="number" id="stationX" min="0" max="9" value="5">
+                    <input type="number" id="stationX" min="-6" max="5" value="0">
                 </div>
                 <div class="control-item">
                     <label for="stationY">Posición Y:</label>
-                    <input type="number" id="stationY" min="0" max="9" value="5">
+                    <input type="number" id="stationY" min="-4" max="3" value="0">
                 </div>
                 <div class="control-item">
                     <button id="addStationBtn">Añadir Estación</button>
@@ -614,6 +786,22 @@ if __name__ == '__main__':
             <button id="stepBtn" disabled>Paso</button>
             <button id="resetBtn" disabled>Reiniciar</button>
             <button id="exportCoordsBtn" disabled>Exportar Coordenadas</button>
+            <button id="loadFilesBtn">Cargar desde archivos</button>
+            <a href="/visualize_plot"><button>Ver Visualización</button></a>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <h3>Cambiar Objetivo</h3>
+                <div class="control-item">
+                    <label for="robotIdSelect">Robot:</label>
+                    <select id="robotIdSelect">
+                        <option value="1">Robot 1</option>
+                        <option value="2">Robot 2</option>
+                    </select>
+                    <button id="nextTargetBtn">Siguiente Objetivo</button>
+                </div>
+            </div>
         </div>
         
         <div class="grid-container">
@@ -626,8 +814,8 @@ if __name__ == '__main__':
 
     <script>
         // Variables globales
-        let gridWidth = 10;
-        let gridHeight = 10;
+        let gridWidth = 14;
+        let gridHeight = 6;
         let robots = [];
         let obstacles = [];
         let chargingStations = [];
@@ -643,17 +831,45 @@ if __name__ == '__main__':
         const stepButton = document.getElementById('stepBtn');
         const resetButton = document.getElementById('resetBtn');
         const exportCoordsButton = document.getElementById('exportCoordsBtn');
+        const loadFilesBtn = document.getElementById('loadFilesBtn');
         const addRobotButton = document.getElementById('addRobotBtn');
         const addStationButton = document.getElementById('addStationBtn');
+        const nextTargetButton = document.getElementById('nextTargetBtn');
 
-        
+        // Funciones de conversión de coordenadas
+        function gridToCenter(x, y) {
+            // Convierte coordenadas de grid a coordenadas centradas
+            return {
+                x: x - Math.floor(gridWidth / 2),
+                y: Math.floor(gridHeight / 2) - y
+            };
+        }
+
+        function centerToGrid(x, y) {
+            // Convierte coordenadas centradas a coordenadas de grid
+            return {
+                x: x + Math.floor(gridWidth / 2),
+                y: Math.floor(gridHeight / 2) - y
+            };
+        }
         
         // Función para añadir un robot
         function addRobot() {
-            const startX = parseInt(document.getElementById('startX').value);
-            const startY = parseInt(document.getElementById('startY').value);
-            const goalX = parseInt(document.getElementById('goalX').value);
-            const goalY = parseInt(document.getElementById('goalY').value);
+            // Obtener valores centrados desde el formulario
+            const centeredStartX = parseInt(document.getElementById('startX').value);
+            const centeredStartY = parseInt(document.getElementById('startY').value);
+            const centeredGoalX = parseInt(document.getElementById('goalX').value);
+            const centeredGoalY = parseInt(document.getElementById('goalY').value);
+            
+            // Convertir a coordenadas de grid
+            const gridStart = centerToGrid(centeredStartX, centeredStartY);
+            const gridGoal = centerToGrid(centeredGoalX, centeredGoalY);
+            
+            const startX = gridStart.x;
+            const startY = gridStart.y;
+            const goalX = gridGoal.x;
+            const goalY = gridGoal.y;
+            
             const color = document.getElementById('robotColor').value;
             const maxBattery = parseFloat(document.getElementById('maxBattery').value);
             const batteryDrainRate = parseFloat(document.getElementById('batteryDrainRate').value);
@@ -717,8 +933,14 @@ if __name__ == '__main__':
         
         // Función para añadir una estación de carga
         function addChargingStation() {
-            const x = parseInt(document.getElementById('stationX').value);
-            const y = parseInt(document.getElementById('stationY').value);
+            // Obtener valores centrados
+            const centeredX = parseInt(document.getElementById('stationX').value);
+            const centeredY = parseInt(document.getElementById('stationY').value);
+            
+            // Convertir a coordenadas del grid
+            const gridPos = centerToGrid(centeredX, centeredY);
+            const x = gridPos.x;
+            const y = gridPos.y;
             
             // Validar que las coordenadas estén dentro del grid
             if (x >= gridWidth || y >= gridHeight || x < 0 || y < 0) {
@@ -762,6 +984,21 @@ if __name__ == '__main__':
             // Obtener valores de los inputs
             gridWidth = parseInt(document.getElementById('gridWidth').value);
             gridHeight = parseInt(document.getElementById('gridHeight').value);
+            
+            // Actualizar límites en los campos de entrada
+            document.getElementById('startX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('startX').max = Math.floor(gridWidth / 2) - 1;
+            document.getElementById('goalX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('goalX').max = Math.floor(gridWidth / 2) - 1;
+            document.getElementById('stationX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('stationX').max = Math.floor(gridWidth / 2) - 1;
+            
+            document.getElementById('startY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('startY').max = Math.floor(gridHeight / 2) - 1;
+            document.getElementById('goalY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('goalY').max = Math.floor(gridHeight / 2) - 1;
+            document.getElementById('stationY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('stationY').max = Math.floor(gridHeight / 2) - 1;
             
             // Validar que hay al menos un robot
             if (robots.length === 0) {
@@ -828,6 +1065,10 @@ if __name__ == '__main__':
             gridElement.style.gridTemplateColumns = `repeat(${gridWidth}, 1fr)`;
             gridElement.style.gridTemplateRows = `repeat(${gridHeight}, 1fr)`;
             
+            // Calcular coordenadas del centro
+            const centerX = Math.floor(gridWidth / 2);
+            const centerY = Math.floor(gridHeight / 2);
+            
             // Crear las celdas
             for (let y = 0; y < gridHeight; y++) {
                 for (let x = 0; x < gridWidth; x++) {
@@ -835,6 +1076,27 @@ if __name__ == '__main__':
                     cell.classList.add('cell');
                     cell.dataset.x = x;
                     cell.dataset.y = y;
+                    
+                    // Convertir y mostrar coordenadas centradas
+                    const centered = gridToCenter(x, y);
+                    cell.dataset.centeredX = centered.x;
+                    cell.dataset.centeredY = centered.y;
+                    
+                    // Mostrar coordenadas centradas en cada celda
+                    if (centered.x === 0 && centered.y === 0) {
+                        cell.textContent = "(0,0)";
+                        cell.classList.add('origin');
+                    } else {
+                        cell.textContent = `(${centered.x},${centered.y})`;
+                    }
+                    
+                    // Marcar los ejes
+                    if (centered.y === 0) {
+                        cell.classList.add('x-axis');
+                    }
+                    if (centered.x === 0) {
+                        cell.classList.add('y-axis');
+                    }
                     
                     // Verificar si es una estación de carga
                     const isChargingStation = chargingStations.some(s => s.x === x && s.y === y);
@@ -1115,6 +1377,86 @@ if __name__ == '__main__':
             }
         }
         
+        // Cargar desde archivos
+        function loadFromFiles() {
+            // Reiniciar la simulación
+            stopSimulation();
+            
+            // Limpiar robots y obstáculos actuales
+            robots = [];
+            obstacles = [];
+            chargingStations = [];
+            
+            // Inicializar con carga desde archivos
+            fetch('/init', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    width: gridWidth,
+                    height: gridHeight,
+                    load_from_files: true
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Actualizar información desde el backend
+                    robots = data.robots;
+                    obstacles = data.obstacles;
+                    chargingStations = data.charging_stations;
+                    
+                    // Actualizar la UI
+                    updateGrid();
+                    updateStatus('Datos cargados desde archivos. Listo para iniciar la simulación.');
+                    startButton.disabled = false;
+                    stepButton.disabled = false;
+                    resetButton.disabled = false;
+                    exportCoordsButton.disabled = false;
+                } else {
+                    alert(data.error || 'Error al cargar datos desde archivos');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                updateStatus('Error al cargar datos desde archivos.');
+            });
+        }
+        
+        // Cambiar al siguiente objetivo
+        function nextTarget() {
+            const robotId = parseInt(document.getElementById('robotIdSelect').value);
+            
+            fetch('/next_target', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ robot_id: robotId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Actualizar la UI para mostrar el nuevo objetivo
+                    const robot = robots.find(r => r.id === robotId);
+                    if (robot) {
+                        robot.goal = data.new_target;
+                        robot.path = data.path;
+                        robot.reached_goal = false;
+                        updateGrid();
+                        updateStatus(`Robot ${robotId} redirigido a nuevo objetivo.`);
+                    }
+                } else {
+                    alert(data.error || 'Error al cambiar de objetivo');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error al comunicarse con el servidor');
+            });
+        }
+        
         // Event listeners para los botones
         initButton.addEventListener('click', initializeGrid);
         startButton.addEventListener('click', startSimulation);
@@ -1123,17 +1465,88 @@ if __name__ == '__main__':
         exportCoordsButton.addEventListener('click', () => {
             window.location.href = '/export_path_coordinates';
         });
+        loadFilesBtn.addEventListener('click', loadFromFiles);
         addRobotButton.addEventListener('click', addRobot);
         addStationButton.addEventListener('click', addChargingStation);
+        nextTargetButton.addEventListener('click', nextTarget);
         
         // Inicializar al cargar la página
         window.addEventListener('load', () => {
-            // Añadir un robot por defecto
+            // Actualizar límites en los campos de entrada basados en el tamaño inicial del grid
+            document.getElementById('startX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('startX').max = Math.floor(gridWidth / 2) - 1;
+            document.getElementById('goalX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('goalX').max = Math.floor(gridWidth / 2) - 1;
+            document.getElementById('stationX').min = -Math.floor(gridWidth / 2);
+            document.getElementById('stationX').max = Math.floor(gridWidth / 2) - 1;
+            
+            document.getElementById('startY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('startY').max = Math.floor(gridHeight / 2) - 1;
+            document.getElementById('goalY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('goalY').max = Math.floor(gridHeight / 2) - 1;
+            document.getElementById('stationY').min = -Math.floor(gridHeight / 2);
+            document.getElementById('stationY').max = Math.floor(gridHeight / 2) - 1;
+            
+            // Añadir un robot por defecto en el origen
+            document.getElementById('startX').value = 0;
+            document.getElementById('startY').value = 0;
+            document.getElementById('goalX').value = 3;
+            document.getElementById('goalY').value = 3;
             addRobot();
+            
             // Añadir una estación de carga por defecto
+            document.getElementById('stationX').value = -3;
+            document.getElementById('stationY').value = -2;
             addChargingStation();
         });
     </script>
+</body>
+</html>""")
+    
+    # También crear la plantilla para la visualización
+    with open('templates/visualize.html', 'w') as f:
+        f.write("""<!DOCTYPE html>
+<html>
+<head>
+    <title>Visualización con Matplotlib</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        img {
+            max-width: 100%;
+            border: 1px solid #ddd;
+        }
+        .buttons {
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 15px;
+            margin-right: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <h1>Visualización de Robots y Obstáculos con Matplotlib</h1>
+    
+    <div class="buttons">
+        <a href="/"><button>Volver a Simulación Interactiva</button></a>
+    </div>
+    
+    <div>
+        <img src="data:image/png;base64,{{ img_data }}" alt="Visualización de robots">
+    </div>
 </body>
 </html>""")
     
