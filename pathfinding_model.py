@@ -54,6 +54,7 @@ class RobotAgent(Agent):
     
     def astar(self, start, goal):
         def heuristic(a, b):
+            # Distancia Manhattan adaptada al nuevo sistema de coordenadas
             return abs(a[0] - b[0]) + abs(a[1] - b[1])
         
         open_set = [start]
@@ -67,14 +68,17 @@ class RobotAgent(Agent):
                 return self.reconstruct_path(came_from, current)
             
             open_set.remove(current)
-            for d in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+            # Definimos los movimientos posibles: derecha, izquierda, arriba, abajo
+            # En este sistema, x aumenta hacia la izquierda
+            for d in [(-1, 0), (1, 0), (0, 1), (0, -1)]:
                 neighbor = (current[0] + d[0], current[1] + d[1])
+                
+                # Verificar si está dentro de los límites del grid
                 if 0 <= neighbor[0] < self.model.grid.width and 0 <= neighbor[1] < self.model.grid.height:
                     # Verificar si hay obstáculos
                     if not self.model.has_obstacle(neighbor):
                         # Verificar si hay otros robots en la posición
                         # Solo considerar como bloqueado si el robot no está en movimiento
-                        # (para permitir que los robots se muevan a través de la ruta planificada)
                         robot_blocking = False
                         for robot in self.model.robots:
                             if robot.unique_id != self.unique_id and robot.pos == neighbor and neighbor != robot.goal:
@@ -112,6 +116,7 @@ class RobotAgent(Agent):
         min_distance = float('inf')
         
         for station in self.model.charging_stations:
+            # Distancia Manhattan adaptada al nuevo sistema
             distance = abs(self.pos[0] - station.pos[0]) + abs(self.pos[1] - station.pos[1])
             if distance < min_distance:
                 min_distance = distance
@@ -239,7 +244,7 @@ class RobotAgent(Agent):
             else:
                 # Recalcular ruta si hay colisión
                 old_path = self.path
-                self.path = self.astar(self.pos, self.path[-1])  # Recalcular a la meta actual (podría ser estación o meta original)
+                self.path = self.astar(self.pos, self.path[-1])  # Recalcular a la meta actual
                 if self.path != old_path:
                     print(f"Robot {self.unique_id} recalculó su ruta debido a una colisión.")
                     

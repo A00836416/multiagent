@@ -326,8 +326,6 @@ def export_path_coordinates():
     
     # Procesar cada robot
     for robot in model.robots:
-        # Añadir identificador del robot
-        
         # Extraer coordenadas x e y por separado
         x_coords = []
         y_coords = []
@@ -362,7 +360,7 @@ if __name__ == '__main__':
     if not os.path.exists('templates'):
         os.makedirs('templates')
     
-    # Modificar el HTML para agregar funcionalidad al botón de exportar
+    # Generar la interfaz HTML con funciones para el nuevo sistema de coordenadas
     with open('templates/index.html', 'w') as f:
         f.write("""<!DOCTYPE html>
 <html lang="es">
@@ -447,8 +445,14 @@ if __name__ == '__main__':
         #grid {
             width: 100%;
             height: 100%;
-            display: grid;
+            display: flex;
+            flex-direction: column;
             position: relative;
+        }
+        .grid-row {
+            display: flex;
+            flex-direction: row-reverse;
+            width: 100%;
         }
         .cell {
             border: 1px solid #ddd;
@@ -459,6 +463,7 @@ if __name__ == '__main__':
             align-items: center;
             justify-content: center;
             transition: background-color 0.3s;
+            aspect-ratio: 1;
         }
         .cell:hover {
             background-color: #f0f0f0;
@@ -530,6 +535,15 @@ if __name__ == '__main__':
         }
         #exportCoordsBtn:hover {
             background-color: #7b1fa2;
+        }
+        
+        #robots-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
         }
     </style>
 </head>
@@ -645,8 +659,6 @@ if __name__ == '__main__':
         const exportCoordsButton = document.getElementById('exportCoordsBtn');
         const addRobotButton = document.getElementById('addRobotBtn');
         const addStationButton = document.getElementById('addStationBtn');
-
-        
         
         // Función para añadir un robot
         function addRobot() {
@@ -818,23 +830,23 @@ if __name__ == '__main__':
             initializeGrid();
         }
         
-        // Función para actualizar el grid
+        // Función para actualizar el grid - MODIFICADA para invertir el orden
         function updateGrid() {
             // Limpiar el grid actual
             gridElement.innerHTML = '';
             robotsContainer.innerHTML = '';
             
-            // Configurar el estilo del grid
-            gridElement.style.gridTemplateColumns = `repeat(${gridWidth}, 1fr)`;
-            gridElement.style.gridTemplateRows = `repeat(${gridHeight}, 1fr)`;
-            
-            // Crear las celdas
+            // Crear filas y celdas
             for (let y = 0; y < gridHeight; y++) {
+                const rowDiv = document.createElement('div');
+                rowDiv.className = 'grid-row';
+                
                 for (let x = 0; x < gridWidth; x++) {
                     const cell = document.createElement('div');
                     cell.classList.add('cell');
                     cell.dataset.x = x;
                     cell.dataset.y = y;
+                    cell.style.width = `${100/gridWidth}%`;
                     
                     // Verificar si es una estación de carga
                     const isChargingStation = chargingStations.some(s => s.x === x && s.y === y);
@@ -930,8 +942,10 @@ if __name__ == '__main__':
                         }
                     });
                     
-                    gridElement.appendChild(cell);
+                    rowDiv.appendChild(cell);
                 }
+                
+                gridElement.appendChild(rowDiv);
             }
             
             // Crear elementos para los robots
@@ -958,9 +972,9 @@ if __name__ == '__main__':
                         return;
                     }
                     
-                    // Convertir coordenadas a índice de celda
-                    const cellIndex = pos.y * gridWidth + pos.x;
-                    const cell = gridElement.children[cellIndex];
+                    // Encontrar la celda correspondiente
+                    const cellSelector = `.cell[data-x="${pos.x}"][data-y="${pos.y}"]`;
+                    const cell = document.querySelector(cellSelector);
                     
                     // Marcar la celda como parte del camino si no es un obstáculo o estación de carga
                     if (cell && !cell.classList.contains('obstacle') && 
@@ -977,51 +991,64 @@ if __name__ == '__main__':
         function createRobotElements() {
             robotsContainer.innerHTML = '';
             
-            const cellWidth = gridElement.offsetWidth / gridWidth;
-            const cellHeight = gridElement.offsetHeight / gridHeight;
-            
             robots.forEach(robot => {
-                // Crear el elemento del robot
-                const robotElement = document.createElement('div');
-                robotElement.id = `robot-${robot.id}`;
-                robotElement.classList.add('robot');
-                robotElement.style.width = `${cellWidth * 0.8}px`;
-                robotElement.style.height = `${cellHeight * 0.8}px`;
-                robotElement.style.backgroundColor = robot.color;
-                robotElement.style.left = `${robot.position.x * cellWidth + (cellWidth * 0.1)}px`;
-                robotElement.style.top = `${robot.position.y * cellHeight + (cellHeight * 0.1)}px`;
+                // Encontrar la celda del robot
+                const cellSelector = `.cell[data-x="${robot.position.x}"][data-y="${robot.position.y}"]`;
+                const cell = document.querySelector(cellSelector);
                 
-                // Texto del robot (ID)
-                robotElement.textContent = robot.id;
-                
-                // Indicador de batería
-                const batteryIndicator = document.createElement('div');
-                batteryIndicator.classList.add('battery-indicator');
-                
-                const batteryLevel = document.createElement('div');
-                batteryLevel.classList.add('battery-level');
-                
-                // Calcular porcentaje de batería
-                const batteryPercentage = (robot.battery_level / robot.max_battery) * 100;
-                batteryLevel.style.width = `${batteryPercentage}%`;
-                
-                // Cambiar color si batería baja
-                if (batteryPercentage < 30) {
-                    batteryLevel.classList.add('battery-low');
+                if (cell) {
+                    const cellRect = cell.getBoundingClientRect();
+                    const gridRect = gridElement.getBoundingClientRect();
+                    
+                    // Crear el elemento del robot
+                    const robotElement = document.createElement('div');
+                    robotElement.id = `robot-${robot.id}`;
+                    robotElement.classList.add('robot');
+                    
+                    // Tamaño basado en el tamaño de la celda
+                    const cellSize = cellRect.width;
+                    robotElement.style.width = `${cellSize * 0.8}px`;
+                    robotElement.style.height = `${cellSize * 0.8}px`;
+                    robotElement.style.backgroundColor = robot.color;
+                    
+                    // Posicionar el robot
+                    const offsetLeft = cellRect.left - gridRect.left;
+                    const offsetTop = cellRect.top - gridRect.top;
+                    robotElement.style.left = `${offsetLeft + (cellSize * 0.1)}px`;
+                    robotElement.style.top = `${offsetTop + (cellSize * 0.1)}px`;
+                    
+                    // Texto del robot (ID)
+                    robotElement.textContent = robot.id;
+                    
+                    // Indicador de batería
+                    const batteryIndicator = document.createElement('div');
+                    batteryIndicator.classList.add('battery-indicator');
+                    
+                    const batteryLevel = document.createElement('div');
+                    batteryLevel.classList.add('battery-level');
+                    
+                    // Calcular porcentaje de batería
+                    const batteryPercentage = (robot.battery_level / robot.max_battery) * 100;
+                    batteryLevel.style.width = `${batteryPercentage}%`;
+                    
+                    // Cambiar color si batería baja
+                    if (batteryPercentage < 30) {
+                        batteryLevel.classList.add('battery-low');
+                    }
+                    
+                    batteryIndicator.appendChild(batteryLevel);
+                    robotElement.appendChild(batteryIndicator);
+                    
+                    // Icono de carga si está cargando
+                    if (robot.charging) {
+                        const chargingIcon = document.createElement('div');
+                        chargingIcon.classList.add('charging-icon');
+                        chargingIcon.textContent = '⚡';
+                        robotElement.appendChild(chargingIcon);
+                    }
+                    
+                    robotsContainer.appendChild(robotElement);
                 }
-                
-                batteryIndicator.appendChild(batteryLevel);
-                robotElement.appendChild(batteryIndicator);
-                
-                // Icono de carga si está cargando
-                if (robot.charging) {
-                    const chargingIcon = document.createElement('div');
-                    chargingIcon.classList.add('charging-icon');
-                    chargingIcon.textContent = '⚡';
-                    robotElement.appendChild(chargingIcon);
-                }
-                
-                robotsContainer.appendChild(robotElement);
             });
         }
         
