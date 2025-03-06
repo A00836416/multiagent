@@ -101,6 +101,33 @@ class RobotAgent(Agent):
             current = came_from[current]
             path.insert(0, current)
         return path
+
+    def change_goal(self, new_goal):
+        """
+        Cambia la meta del robot y recalcula la ruta
+        
+        Args:
+            new_goal: La nueva posición objetivo (tupla o lista)
+            
+        Returns:
+            bool: True si se encontró una ruta, False en caso contrario
+        """
+        # Convertir lista a tupla si es necesario
+        if isinstance(new_goal, list):
+            new_goal = tuple(new_goal)
+            
+        # Establecer la nueva meta
+        self.goal = new_goal
+        
+        # Resetear los indicadores relacionados con la meta
+        self.reached_goal = False
+        self.returning_to_task = False
+        
+        # Calcular la nueva ruta desde la posición actual hasta la nueva meta
+        self.path = self.astar(self.pos, new_goal)
+        
+        # Retornar si se encontró una ruta
+        return len(self.path) > 0
     
     def get_battery_percentage(self):
         """Devuelve el porcentaje de batería actual"""

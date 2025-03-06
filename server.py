@@ -41,11 +41,18 @@ def initialize():
     # Inicializar el modelo con múltiples robots y estaciones de carga
     model = PathFindingModel(width, height, robots_config, charging_stations_config)
     
-    # Añadir obstáculos si se proporcionan
     obstacles = []
     if obstacles_list:
         for obs in obstacles_list:
-            x, y = obs.get('x', 0), obs.get('y', 0)
+            # Si el obstáculo está en formato {x:X, y:Y}
+            if isinstance(obs, dict):
+                x, y = obs.get('x', 0), obs.get('y', 0)
+            # Si el obstáculo está en formato [x, y]
+            elif isinstance(obs, list):
+                x, y = obs[0], obs[1]
+            else:
+                continue
+                
             if model.add_obstacle((x, y)):
                 obstacles.append({'x': x, 'y': y})
     
@@ -115,6 +122,38 @@ def step():
         'success': True,
         'robots': robots_info,
         'all_reached_goal': all_reached_goal
+    })
+
+@app.route('/change_goal', methods=['POST'])
+def change_goal():
+    """Cambia la meta de un robot"""
+    global model
+    
+    if model is None:
+        return jsonify({'error': 'Modelo no inicializado'}), 400
+    
+    data = request.json
+    robot_id = int(data.get('robot_id', 0))
+    goal_x = int(data.get('goal_x', 0))
+    goal_y = int(data.get('goal_y', 0))
+    
+    # Encontrar el robot
+    robot = next((r for r in model.robots if r.unique_id == robot_id), None)
+    if not robot:
+        return jsonify({'error': f'Robot {robot_id} no encontrado'}), 404
+    
+    # Cambiar la meta y recalcular la ruta
+    success = robot.change_goal((goal_x, goal_y))
+    
+    if not success:
+        return jsonify({
+            'success': False,
+            'error': 'No se pudo encontrar ruta a la nueva meta'
+        }), 400
+    
+    return jsonify({
+        'success': True,
+        'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
     })
 
 @app.route('/add_obstacle', methods=['POST'])
@@ -529,6 +568,18 @@ if __name__ == '__main__':
             right: -15px;
             font-size: 12px;
         }
+
+        .truck-position {
+            background-color: #795548 !important; /* Marrón para representar camiones */
+            color: white;
+            font-size: 1.2em;
+        }
+
+        .delivery-point {
+            background-color: #8BC34A !important; /* Verde para puntos de entrega */
+            color: white;
+            font-size: 1.2em;
+        }
         
         #exportCoordsBtn {
             background-color: #9c27b0;  /* Color morado para diferenciarlo */
@@ -555,11 +606,11 @@ if __name__ == '__main__':
             <div class="control-group">
                 <div class="control-item">
                     <label for="gridWidth">Ancho del Grid:</label>
-                    <input type="number" id="gridWidth" min="5" max="20" value="10">
+                    <input type="number" id="gridWidth" min="5" max="50" value="40">
                 </div>
                 <div class="control-item">
                     <label for="gridHeight">Alto del Grid:</label>
-                    <input type="number" id="gridHeight" min="5" max="20" value="10">
+                    <input type="number" id="gridHeight" min="5" max="50" value="22">
                 </div>
             </div>
         </div>
@@ -569,19 +620,19 @@ if __name__ == '__main__':
                 <h3>Añadir Robot</h3>
                 <div class="control-item">
                     <label for="startX">Inicio X:</label>
-                    <input type="number" id="startX" min="0" max="9" value="1">
+                    <input type="number" id="startX" min="0" max="39" value="1">
                 </div>
                 <div class="control-item">
                     <label for="startY">Inicio Y:</label>
-                    <input type="number" id="startY" min="0" max="9" value="1">
+                    <input type="number" id="startY" min="0" max="21" value="1">
                 </div>
                 <div class="control-item">
                     <label for="goalX">Meta X:</label>
-                    <input type="number" id="goalX" min="0" max="9" value="8">
+                    <input type="number" id="goalX" min="0" max="39" value="38">
                 </div>
                 <div class="control-item">
                     <label for="goalY">Meta Y:</label>
-                    <input type="number" id="goalY" min="0" max="9" value="8">
+                    <input type="number" id="goalY" min="0" max="21" value="20">
                 </div>
                 <div class="control-item">
                     <label for="robotColor">Color:</label>
@@ -610,11 +661,11 @@ if __name__ == '__main__':
                 <h3>Añadir Estación de Carga</h3>
                 <div class="control-item">
                     <label for="stationX">Posición X:</label>
-                    <input type="number" id="stationX" min="0" max="9" value="5">
+                    <input type="number" id="stationX" min="0" max="39" value="20">
                 </div>
                 <div class="control-item">
                     <label for="stationY">Posición Y:</label>
-                    <input type="number" id="stationY" min="0" max="9" value="5">
+                    <input type="number" id="stationY" min="0" max="21" value="10">
                 </div>
                 <div class="control-item">
                     <button id="addStationBtn">Añadir Estación</button>
@@ -640,8 +691,8 @@ if __name__ == '__main__':
 
     <script>
         // Variables globales
-        let gridWidth = 10;
-        let gridHeight = 10;
+        let gridWidth = 40;
+        let gridHeight = 22;
         let robots = [];
         let obstacles = [];
         let chargingStations = [];
@@ -659,6 +710,63 @@ if __name__ == '__main__':
         const exportCoordsButton = document.getElementById('exportCoordsBtn');
         const addRobotButton = document.getElementById('addRobotBtn');
         const addStationButton = document.getElementById('addStationBtn');
+
+        const predefinedObstacles = [
+            {x: 2, y: 2}, {x: 2, y: 3}, {x: 2, y: 4}, {x: 2, y: 5}, {x: 2, y: 6}, {x: 2, y: 7}, {x: 2, y: 13}, {x: 2, y: 15}, {x: 2, y: 17}, {x: 2, y: 19},
+            {x: 3, y: 2}, {x: 3, y: 3}, {x: 3, y: 4}, {x: 3, y: 5}, {x: 3, y: 6}, {x: 3, y: 7}, {x: 3, y: 13}, {x: 3, y: 15}, {x: 3, y: 17}, {x: 3, y: 19},
+            {x: 5, y: 2}, {x: 5, y: 3}, {x: 5, y: 4}, {x: 5, y: 5}, {x: 5, y: 6}, {x: 5, y: 7}, {x: 5, y: 13}, {x: 5, y: 15}, {x: 5, y: 17}, {x: 5, y: 19},
+            {x: 6, y: 2}, {x: 6, y: 3}, {x: 6, y: 4}, {x: 6, y: 5}, {x: 6, y: 6}, {x: 6, y: 7}, {x: 6, y: 13}, {x: 6, y: 15}, {x: 6, y: 17}, {x: 6, y: 19},
+            {x: 11, y: 2}, {x: 11, y: 3}, {x: 11, y: 4}, {x: 11, y: 5}, {x: 11, y: 6}, {x: 11, y: 7},
+            {x: 12, y: 2}, {x: 12, y: 3}, {x: 12, y: 4}, {x: 12, y: 5}, {x: 12, y: 6}, {x: 12, y: 7},
+            {x: 14, y: 2}, {x: 14, y: 3}, {x: 14, y: 4}, {x: 14, y: 5}, {x: 14, y: 6}, {x: 14, y: 7},
+            {x: 15, y: 2}, {x: 15, y: 3}, {x: 15, y: 4}, {x: 15, y: 5}, {x: 15, y: 6}, {x: 15, y: 7},
+            {x: 18, y: 11}, {x: 18, y: 13}, {x: 18, y: 15}, {x: 18, y: 17}, {x: 18, y: 19},
+            {x: 19, y: 11}, {x: 19, y: 13}, {x: 19, y: 15}, {x: 19, y: 17}, {x: 19, y: 19},
+            {x: 20, y: 2}, {x: 20, y: 3}, {x: 20, y: 4}, {x: 20, y: 5}, {x: 20, y: 6}, {x: 20, y: 7},
+            {x: 21, y: 2}, {x: 21, y: 3}, {x: 21, y: 4}, {x: 21, y: 5}, {x: 21, y: 6}, {x: 21, y: 7}, {x: 21, y: 11}, {x: 21, y: 13}, {x: 21, y: 15}, {x: 21, y: 17}, {x: 21, y: 19},
+            {x: 22, y: 11}, {x: 22, y: 13}, {x: 22, y: 15}, {x: 22, y: 17}, {x: 22, y: 19},
+            {x: 23, y: 2}, {x: 23, y: 3}, {x: 23, y: 4}, {x: 23, y: 5}, {x: 23, y: 6}, {x: 23, y: 7},
+            {x: 24, y: 2}, {x: 24, y: 3}, {x: 24, y: 4}, {x: 24, y: 5}, {x: 24, y: 6}, {x: 24, y: 7},
+            {x: 32, y: 13}, {x: 32, y: 15}, {x: 32, y: 17}, {x: 32, y: 19},
+            {x: 33, y: 13}, {x: 33, y: 15}, {x: 33, y: 17}, {x: 33, y: 19},
+            {x: 35, y: 13}, {x: 35, y: 15}, {x: 35, y: 17}, {x: 35, y: 19},
+            {x: 36, y: 13}, {x: 36, y: 15}, {x: 36, y: 17}, {x: 36, y: 19}
+        ];
+
+        const predefinedChargingStations = [
+            {x: 34, y: 1},
+            {x: 34, y: 3},
+            {x: 36, y: 1},
+            {x: 36, y: 3},
+            {x: 38, y: 1},
+            {x: 38, y: 3}
+        ];
+
+        // Definir posiciones de camiones para recogida de paquetes
+        const predefinedTruckPositions = [
+            {x: 11, y: 21},
+            {x: 12, y: 21},
+            {x: 13, y: 21},
+            {x: 26, y: 21},
+            {x: 27, y: 21},
+            {x: 28, y: 21}
+        ];
+
+        // Definir los puntos de entrega (metas)
+        const predefinedDeliveryPoints = [
+            {x: 2, y: 14}, {x: 2, y: 16}, {x: 2, y: 18},
+            {x: 3, y: 14}, {x: 3, y: 16}, {x: 3, y: 18},
+            {x: 5, y: 14}, {x: 5, y: 16}, {x: 5, y: 18},
+            {x: 6, y: 14}, {x: 6, y: 16}, {x: 6, y: 18},
+            {x: 10, y: 2}, {x: 10, y: 3}, {x: 10, y: 4}, {x: 10, y: 5}, {x: 10, y: 6}, {x: 10, y: 7},
+            {x: 13, y: 2}, {x: 13, y: 3}, {x: 13, y: 4}, {x: 13, y: 5}, {x: 13, y: 6}, {x: 13, y: 7},
+            {x: 16, y: 2}, {x: 16, y: 3}, {x: 16, y: 4}, {x: 16, y: 5}, {x: 16, y: 6}, {x: 16, y: 7},
+            {x: 32, y: 14}, {x: 32, y: 16}, {x: 32, y: 18},
+            {x: 33, y: 14}, {x: 33, y: 16}, {x: 33, y: 18},
+            {x: 35, y: 14}, {x: 35, y: 16}, {x: 35, y: 18},
+            {x: 36, y: 14}, {x: 36, y: 16}, {x: 36, y: 18}
+        ];
+
         
         // Función para añadir un robot
         function addRobot() {
@@ -726,7 +834,9 @@ if __name__ == '__main__':
                 });
             }
         }
-        
+        function isTruckPosition(x, y) {
+            return predefinedTruckPositions.some(pos => pos.x === x && pos.y === y);
+        }
         // Función para añadir una estación de carga
         function addChargingStation() {
             const x = parseInt(document.getElementById('stationX').value);
@@ -769,7 +879,6 @@ if __name__ == '__main__':
             }
         }
         
-        // Función para inicializar el grid
         function initializeGrid() {
             // Obtener valores de los inputs
             gridWidth = parseInt(document.getElementById('gridWidth').value);
@@ -780,6 +889,16 @@ if __name__ == '__main__':
                 alert('Añade al menos un robot antes de inicializar');
                 return;
             }
+            
+            // Filtrar obstáculos que están dentro de los límites del grid
+            const validObstacles = predefinedObstacles.filter(
+                obs => obs.x < gridWidth && obs.y < gridHeight && obs.x >= 0 && obs.y >= 0
+            );
+            
+            // Filtrar estaciones de carga predefinidas que están dentro de los límites del grid
+            const validChargingStations = predefinedChargingStations.filter(
+                station => station.x < gridWidth && station.y < gridHeight && station.x >= 0 && station.y >= 0
+            );
             
             // Inicializar el modelo en el backend
             fetch('/init', {
@@ -798,7 +917,8 @@ if __name__ == '__main__':
                         battery_drain_rate: robot.battery_drain_rate,
                         battery_level: robot.battery_level
                     })),
-                    charging_stations: chargingStations.map(station => [station.x, station.y])
+                    charging_stations: validChargingStations.map(station => [station.x, station.y]),
+                    obstacles: validObstacles
                 })
             })
             .then(response => response.json())
@@ -807,11 +927,11 @@ if __name__ == '__main__':
                     // Actualizar información desde el backend
                     robots = data.robots;
                     chargingStations = data.charging_stations;
-                    obstacles = [];
+                    obstacles = data.obstacles;
                     
                     // Actualizar la UI
                     updateGrid();
-                    updateStatus('Modelo inicializado. Listo para iniciar la simulación.');
+                    updateStatus('Modelo inicializado con obstáculos y estaciones de carga predefinidos. Listo para iniciar la simulación.');
                     startButton.disabled = false;
                     stepButton.disabled = false;
                     resetButton.disabled = false;
@@ -823,6 +943,27 @@ if __name__ == '__main__':
                 updateStatus('Error al inicializar el modelo.');
             });
         }
+
+                // Añadir después de inicializar
+        window.addEventListener('load', () => {
+            // Añadir un botón al final de la sección de botones
+            const buttonsDiv = document.querySelector('.buttons');
+            const loadObstaclesBtn = document.createElement('button');
+            loadObstaclesBtn.textContent = 'Cargar Obstáculos Predefinidos';
+            loadObstaclesBtn.style.backgroundColor = '#FF5722';
+            loadObstaclesBtn.onclick = addPredefinedObstacles;
+            loadObstaclesBtn.disabled = true;
+            buttonsDiv.appendChild(loadObstaclesBtn);
+            
+            // Habilitar el botón después de inicializar
+            document.getElementById('initBtn').addEventListener('click', () => {
+                setTimeout(() => {
+                    if (!document.getElementById('startBtn').disabled) {
+                        loadObstaclesBtn.disabled = false;
+                    }
+                }, 500);
+            });
+        });
 
         // Reiniciar la simulación
         function resetSimulation() {
@@ -874,6 +1015,19 @@ if __name__ == '__main__':
                     const isObstacle = obstacles.some(o => o.x === x && o.y === y);
                     if (isObstacle) {
                         cell.classList.add('obstacle');
+                    }
+
+                    // Verificar si es un punto de entrega
+                    const isDeliveryPoint = predefinedDeliveryPoints.some(d => d.x === x && d.y === y);
+                    if (isDeliveryPoint) {
+                        cell.classList.add('delivery-point');
+                        cell.innerHTML = "📦"; // Emoji de paquete
+                    }
+
+                    const isTruckPosition = predefinedTruckPositions.some(t => t.x === x && t.y === y);
+                    if (isTruckPosition) {
+                        cell.classList.add('truck-position');
+                        cell.innerHTML = "🚚"; // Emoji de camión
                     }
                     
                     // Añadir evento de clic para agregar obstáculos
@@ -1157,8 +1311,6 @@ if __name__ == '__main__':
         window.addEventListener('load', () => {
             // Añadir un robot por defecto
             addRobot();
-            // Añadir una estación de carga por defecto
-            addChargingStation();
         });
     </script>
 </body>
