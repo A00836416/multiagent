@@ -55,6 +55,12 @@ class RobotAgent(Agent):
         self.low_battery_threshold = 30  # % de batería para buscar estación de carga
         self.nearest_charging_station = None
         self.original_path = self.path.copy() if self.path else []
+        self.blocked_count = 0  # Contador para cuando el robot está bloqueado
+        self.waiting_time = 0   # Tiempo de espera cuando hay bloqueo
+        self.last_position = None  # Para detectar si el robot está atascado
+        self.position_unchanged_count = 0  # Contador de pasos en los que no ha cambiado de posición
+        self.alternative_paths_tried = []  # Guardar rutas alternativas ya intentadas
+        self.priority = 1  # Prioridad base del robot (mayor número = mayor prioridad)
         self.returning_to_task = False
         # Añadir estas líneas al final del constructor:
         self.carrying_package = None  # Paquete que lleva el robot
@@ -153,7 +159,11 @@ class RobotAgent(Agent):
         self.package_destination = package.pickup_location
         # Cambiar la meta a la ubicación de recogida
         self.change_goal(package.pickup_location)
-        self.idle = False
+        # Aumentar la prioridad cuando tiene un paquete asignado
+        self.priority = 2
+        # Cambiar el estado idle a False si existe
+        if hasattr(self, 'idle'):
+            self.idle = False
         print(f"Robot {self.unique_id}: Asignado paquete {package.id}. Dirigiéndose a recogerlo.")
     
     def pick_package(self):
@@ -165,6 +175,7 @@ class RobotAgent(Agent):
             self.package_destination = self.carrying_package.delivery_location
             # Cambiar la meta al punto de entrega
             self.change_goal(self.carrying_package.delivery_location)
+            self.priority = 3
             print(f"Robot {self.unique_id}: Recogió paquete {self.carrying_package.id}. Dirigiéndose a entregarlo.")
             return True
         return False
@@ -182,8 +193,12 @@ class RobotAgent(Agent):
             delivered_package = self.carrying_package
             self.carrying_package = None
             self.package_destination = None
-            self.idle = True
-            self.path = []
+            # Volver a prioridad normal
+            self.priority = 1
+            # Volver a estado idle si corresponde
+            if hasattr(self, 'idle'):
+                self.idle = True
+                self.path = []
             print(f"Robot {self.unique_id}: Entregó paquete {delivered_package.id}. Listo para nueva tarea.")
             return True
         return False
@@ -284,7 +299,7 @@ class RobotAgent(Agent):
         return None
     
     def step(self):
-        if self.idle:
+        if hasattr(self, 'idle') and self.idle:
             return
 
         if self.carrying_package and self.pos == self.package_destination:
@@ -319,7 +334,24 @@ class RobotAgent(Agent):
                 # Si no está en una estación de carga pero estaba en modo carga, algo salió mal
                 self.charging = False
                 print(f"Robot {self.unique_id}: Error: No se encontró estación de carga en la posición actual.")
+            
+
+            # Actualizar contador de posición sin cambios
+        if self.last_position == self.pos:
+            self.position_unchanged_count += 1
+        else:
+            self.position_unchanged_count = 0
+            self.last_position = self.pos
         
+        # Si lleva demasiado tiempo sin moverse, aumentar prioridad y buscar rutas alternativas
+        if self.position_unchanged_count > 5:
+            self.priority += 1  # Aumentar prioridad cada vez que está bloqueado
+            print(f"Robot {self.unique_id}: Posiblemente bloqueado, aumentando prioridad a {self.priority}")
+            
+            # Buscar una ruta completamente nueva si está bloqueado demasiado tiempo
+            if self.position_unchanged_count > 10:
+                self.find_alternative_route()
+
         # Movimiento normal (si no está cargando)
         elif len(self.path) > 1:
             # Verificar si hay suficiente batería para moverse
@@ -328,14 +360,18 @@ class RobotAgent(Agent):
                 
             next_pos = self.path[1]  # El siguiente paso en la ruta
             
-            # Verificar si el siguiente paso está ocupado por otro robot
-            occupied = False
+                # Verificar si el siguiente paso está ocupado por otro robot
+            blocking_robot = None
             for robot in self.model.robots:
                 if robot.unique_id != self.unique_id and robot.pos == next_pos:
-                    occupied = True
+                    blocking_robot = robot
                     break
             
-            if not occupied:
+            if blocking_robot is None:
+                # El camino está libre, moverse normalmente
+                self.blocked_count = 0  # Resetear contador de bloqueo
+                self.waiting_time = 0   # Resetear tiempo de espera
+                
                 self.path.pop(0)
                 next_pos = self.path[0]
                 self.model.grid.move_agent(self, next_pos)
@@ -354,12 +390,28 @@ class RobotAgent(Agent):
                     status = "Cargando" if self.charging else "Retornando a tarea" if self.returning_to_task else "Normal"
                     print(f"Robot {self.unique_id} se movió a {next_pos} (Paso {self.steps_taken}, Batería: {self.battery_level:.1f}%, Estado: {status})")
             else:
-                # Recalcular ruta si hay colisión
-                old_path = self.path
-                self.path = self.astar(self.pos, self.path[-1])  # Recalcular a la meta actual
-                if self.path != old_path:
-                    print(f"Robot {self.unique_id} recalculó su ruta debido a una colisión.")
+                # Camino bloqueado por otro robot
+                self.blocked_count += 1
+                
+                # Determinar qué robot tiene mayor prioridad
+                if self.priority > blocking_robot.priority or (self.priority == blocking_robot.priority and self.unique_id < blocking_robot.unique_id):
+                    # Este robot tiene mayor prioridad
+                    print(f"Robot {self.unique_id} (prioridad {self.priority}) está bloqueado por Robot {blocking_robot.unique_id} (prioridad {blocking_robot.priority})")
                     
+                    # Si está bloqueado por poco tiempo, esperar
+                    if self.blocked_count < 3:
+                        print(f"Robot {self.unique_id} esperando {self.blocked_count} turno(s)...")
+                        return
+                    
+                    # Después de esperar, buscar ruta alternativa
+                    self.find_alternative_route()
+                else:
+                    # El otro robot tiene mayor prioridad, esperar un poco más
+                    self.waiting_time += 1
+                    if self.waiting_time > 2:
+                        # Después de esperar, buscar ruta alternativa
+                        print(f"Robot {self.unique_id} cede el paso a Robot {blocking_robot.unique_id} y busca ruta alternativa")
+                        self.find_alternative_route()
         elif len(self.path) == 1 and self.pos == self.path[0]:
             # Si llegó al final de la ruta
             if self.pos == self.goal and not self.returning_to_task:
@@ -372,6 +424,179 @@ class RobotAgent(Agent):
             if station and not self.charging and self.nearest_charging_station:
                 print(f"Robot {self.unique_id}: Llegó a estación de carga.")
                 self.charging = True
+    
+    def find_alternative_route(self):
+        """Busca una ruta alternativa cuando el robot está bloqueado"""
+        print(f"Robot {self.unique_id}: Buscando ruta alternativa...")
+        
+        # Guardar la ruta actual para compararla
+        old_path = self.path.copy() if self.path else []
+        
+        # Determinar destino final (meta del robot o estación de carga)
+        destination = self.goal
+        if self.charging and self.nearest_charging_station:
+            destination = self.nearest_charging_station.pos
+        
+        # Estrategia 1: Ruta normal A* (ya intentada pero volvemos a intentar por si hay cambios)
+        self.path = self.astar(self.pos, destination)
+        
+        # Si no encontró ruta o es la misma, probar con penalización de posiciones ocupadas
+        if not self.path or self.path == old_path or self.path_in_tried_alternatives(self.path):
+            print(f"Robot {self.unique_id}: Buscando ruta con penalización de robots...")
+            self.path = self.astar_with_robot_penalty(self.pos, destination)
+        
+        # Si aún no encuentra ruta, intentar una ruta más larga con desvío
+        if not self.path or self.path == old_path or self.path_in_tried_alternatives(self.path):
+            print(f"Robot {self.unique_id}: Buscando ruta con desvío...")
+            self.path = self.find_path_with_detour(self.pos, destination)
+        
+        # Si sigue sin encontrar ruta, esperar y mantener la ruta anterior
+        if not self.path:
+            print(f"Robot {self.unique_id}: No se encontró ruta alternativa, manteniendo la actual y esperando...")
+            self.path = old_path
+            return False
+        
+        # Guardar esta ruta en las alternativas probadas
+        if len(self.alternative_paths_tried) > 3:
+            self.alternative_paths_tried.pop(0)  # Eliminar la más antigua
+        self.alternative_paths_tried.append([tuple(pos) for pos in self.path])
+        
+        # Resetear contadores
+        self.blocked_count = 0
+        self.waiting_time = 0
+        
+        # Imprimir información sobre la nueva ruta
+        if self.path != old_path:
+            print(f"Robot {self.unique_id}: Ruta recalculada con éxito, longitud: {len(self.path)}")
+            return True
+        else:
+            print(f"Robot {self.unique_id}: No se encontró una ruta mejor")
+            return False
+
+    def path_in_tried_alternatives(self, path):
+        """Verifica si una ruta ya fue probada anteriormente"""
+        if not path:
+            return False
+        
+        path_tuples = [tuple(pos) for pos in path]
+        
+        for tried_path in self.alternative_paths_tried:
+            if len(tried_path) == len(path_tuples):
+                matches = True
+                for i in range(len(tried_path)):
+                    if tried_path[i] != path_tuples[i]:
+                        matches = False
+                        break
+                if matches:
+                    return True
+        
+        return False
+
+    def astar_with_robot_penalty(self, start, goal):
+        """A* con penalización adicional por celdas cercanas a robots"""
+        def heuristic(a, b):
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+        
+        # Crear un mapa de penalizaciones basado en posiciones de robots
+        robot_penalty_map = {}
+        for robot in self.model.robots:
+            if robot.unique_id != self.unique_id:
+                # Penalizar la posición del robot
+                robot_penalty_map[robot.pos] = 10
+                
+                # Penalizar posiciones adyacentes
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    pos = (robot.pos[0] + dx, robot.pos[1] + dy)
+                    if 0 <= pos[0] < self.model.grid.width and 0 <= pos[1] < self.model.grid.height:
+                        robot_penalty_map[pos] = robot_penalty_map.get(pos, 0) + 5
+        
+        open_set = [start]
+        came_from = {}
+        g_score = {start: 0}
+        f_score = {start: heuristic(start, goal)}
+        
+        while open_set:
+            current = min(open_set, key=lambda x: f_score.get(x, float('inf')))
+            if current == goal:
+                return self.reconstruct_path(came_from, current)
+            
+            open_set.remove(current)
+            
+            for d in [(-1, 0), (1, 0), (0, 1), (0, -1)]:
+                neighbor = (current[0] + d[0], current[1] + d[1])
+                
+                if 0 <= neighbor[0] < self.model.grid.width and 0 <= neighbor[1] < self.model.grid.height:
+                    if not self.model.has_obstacle(neighbor):
+                        # Base cost
+                        move_cost = 1
+                        
+                        # Additional penalty if position is near robots
+                        move_cost += robot_penalty_map.get(neighbor, 0)
+                        
+                        tentative_g_score = g_score[current] + move_cost
+                        if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                            came_from[neighbor] = current
+                            g_score[neighbor] = tentative_g_score
+                            f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal)
+                            if neighbor not in open_set:
+                                open_set.append(neighbor)
+        return []
+    
+    def find_path_with_detour(self, start, goal):
+        """Busca un camino con desvío para evitar bloqueos"""
+        # Encontrar un punto intermedio para desvío
+        detour_points = []
+        
+        # Calcular la dirección general hacia la meta
+        dx = goal[0] - start[0]
+        dy = goal[1] - start[1]
+        
+        # Generar puntos de desvío perpendiculares a la dirección principal
+        if abs(dx) > abs(dy):  # Movimiento principalmente horizontal
+            # Intentar desvíos verticales
+            detour_points.append((start[0], start[1] + 3))
+            detour_points.append((start[0], start[1] - 3))
+        else:  # Movimiento principalmente vertical
+            # Intentar desvíos horizontales
+            detour_points.append((start[0] + 3, start[1]))
+            detour_points.append((start[0] - 3, start[1]))
+        
+        # Añadir algunos puntos aleatorios
+        import random
+        for _ in range(2):
+            random_dx = random.randint(-5, 5)
+            random_dy = random.randint(-5, 5)
+            detour_points.append((start[0] + random_dx, start[1] + random_dy))
+        
+        # Filtrar puntos fuera de los límites o con obstáculos
+        valid_detour_points = []
+        for point in detour_points:
+            if (0 <= point[0] < self.model.grid.width and 
+                0 <= point[1] < self.model.grid.height and
+                not self.model.has_obstacle(point)):
+                valid_detour_points.append(point)
+        
+        # Intentar encontrar un camino con desvío
+        for detour_point in valid_detour_points:
+            # Camino hasta el punto de desvío
+            path_to_detour = self.astar(start, detour_point)
+            if not path_to_detour:
+                continue
+                
+            # Camino desde el desvío hasta la meta
+            path_from_detour = self.astar(detour_point, goal)
+            if not path_from_detour:
+                continue
+                
+            # Combinar los caminos (eliminar duplicado del punto de desvío)
+            combined_path = path_to_detour + path_from_detour[1:]
+            print(f"Robot {self.unique_id}: Ruta con desvío encontrada a través de {detour_point}")
+            return combined_path
+        
+        # Si no se encontró ningún camino con desvío
+        return []
+
+    
 
 class PathFindingModel(Model):
     def __init__(self, width, height, robot_configs, charging_station_positions=None):
