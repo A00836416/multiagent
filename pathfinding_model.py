@@ -3,9 +3,20 @@ from mesa.space import MultiGrid
 from mesa.time import BaseScheduler
 from mesa.datacollection import DataCollector
 
+class Package:
+    """Representa un paquete que debe ser recogido y entregado"""
+    def __init__(self, package_id, pickup_location, delivery_location):
+        self.id = package_id
+        self.pickup_location = pickup_location  # Posición de recogida (camión)
+        self.delivery_location = delivery_location  # Posición de entrega (góndola)
+        self.status = 'waiting'  # waiting, assigned, picked, delivered
+        self.assigned_robot_id = None
+        self.pickup_time = None
+        self.delivery_time = None
+
 class ObstacleAgent(Agent):
     """Agente que representa un obstáculo en el grid"""
-    def __init__(self, unique_id, model):
+    def __init__(self, unique_id, model):        
         super().__init__(unique_id, model)
     
     def step(self):
@@ -45,6 +56,11 @@ class RobotAgent(Agent):
         self.nearest_charging_station = None
         self.original_path = self.path.copy() if self.path else []
         self.returning_to_task = False
+        # Añadir estas líneas al final del constructor:
+        self.carrying_package = None  # Paquete que lleva el robot
+        self.package_destination = None  # Destino del paquete (recogida o entrega)
+        self.total_packages_delivered = 0  # Contador de paquetes entregados por este robot
+        self.idle = True  # Por defecto, el robot empieza en estado idle
         
         if not self.path:
             print(f"Robot {unique_id}: No se encontró camino del inicio al objetivo.")
@@ -128,6 +144,68 @@ class RobotAgent(Agent):
         
         # Retornar si se encontró una ruta
         return len(self.path) > 0
+    def assign_package(self, package):
+        """Asigna un paquete al robot"""
+        self.carrying_package = package
+        package.assigned_robot_id = self.unique_id
+        package.status = 'assigned'
+        # Establecer el punto de recogida como destino
+        self.package_destination = package.pickup_location
+        # Cambiar la meta a la ubicación de recogida
+        self.change_goal(package.pickup_location)
+        self.idle = False
+        print(f"Robot {self.unique_id}: Asignado paquete {package.id}. Dirigiéndose a recogerlo.")
+    
+    def pick_package(self):
+        """El robot recoge un paquete del punto de recogida"""
+        if self.carrying_package and self.carrying_package.status == 'assigned':
+            self.carrying_package.status = 'picked'
+            self.carrying_package.pickup_time = self.model.schedule.steps
+            # Actualizar destino al punto de entrega
+            self.package_destination = self.carrying_package.delivery_location
+            # Cambiar la meta al punto de entrega
+            self.change_goal(self.carrying_package.delivery_location)
+            print(f"Robot {self.unique_id}: Recogió paquete {self.carrying_package.id}. Dirigiéndose a entregarlo.")
+            return True
+        return False
+    
+    def deliver_package(self):
+        """El robot entrega un paquete en el punto de entrega"""
+        if self.carrying_package and self.carrying_package.status == 'picked':
+            self.carrying_package.status = 'delivered'
+            self.carrying_package.delivery_time = self.model.schedule.steps
+            # Añadir a las estadísticas del modelo
+            self.model.delivered_packages.append(self.carrying_package)
+            # Incrementar contador del robot
+            self.total_packages_delivered += 1
+            # Limpiar estado
+            delivered_package = self.carrying_package
+            self.carrying_package = None
+            self.package_destination = None
+            self.idle = True
+            self.path = []
+            print(f"Robot {self.unique_id}: Entregó paquete {delivered_package.id}. Listo para nueva tarea.")
+            return True
+        return False
+    
+    def check_package_status(self):
+        """
+        Verifica si el robot está en un punto de recogida o entrega
+        y actúa en consecuencia
+        """
+        if self.carrying_package:
+            # Si está en el punto de recogida y el paquete está asignado
+            if (self.pos == self.package_destination and 
+                self.carrying_package.status == 'assigned'):
+                self.pick_package()
+                return True
+                
+            # Si está en el punto de entrega y el paquete está recogido
+            elif (self.pos == self.package_destination and 
+                  self.carrying_package.status == 'picked'):
+                self.deliver_package()
+                return True
+        return False
     
     def get_battery_percentage(self):
         """Devuelve el porcentaje de batería actual"""
@@ -206,6 +284,13 @@ class RobotAgent(Agent):
         return None
     
     def step(self):
+        if self.idle:
+            return
+
+        if self.carrying_package and self.pos == self.package_destination:
+            if self.check_package_status():
+                return  # Si se recogió/entregó un paquete, terminar el paso
+
         # Si ya llegó a la meta, no hacer nada
         if self.reached_goal and not self.charging:
             return
@@ -296,6 +381,9 @@ class PathFindingModel(Model):
         self.obstacles = []  # Lista para almacenar los agentes obstáculo
         self.robots = []  # Lista para almacenar los robots
         self.charging_stations = []  # Lista para almacenar las estaciones de carga
+        self.packages = []  # Lista de todos los paquetes
+        self.delivered_packages = []  # Lista de paquetes entregados
+        self.next_package_id = 1  # ID para el siguiente paquete
         
         # Crear y registrar las estaciones de carga (no son agentes)
         if charging_station_positions:
@@ -344,6 +432,43 @@ class PathFindingModel(Model):
             }
         )
     
+    def create_package(self, pickup_location, delivery_location):
+        """Crea un nuevo paquete"""
+        package = Package(self.next_package_id, pickup_location, delivery_location)
+        self.next_package_id += 1
+        self.packages.append(package)
+        return package
+
+    def get_available_packages(self):
+        """Retorna los paquetes disponibles para asignación"""
+        return [p for p in self.packages if p.status == 'waiting']
+    
+    def get_truck_positions(self):
+        """Retorna una lista de todas las posiciones de los camiones (a implementar en server.py)"""
+        # Este método se implementará en el servidor
+        pass
+    
+    def get_delivery_positions(self):
+        """Retorna una lista de todos los puntos de entrega (a implementar en server.py)"""
+        # Este método se implementará en el servidor
+        pass
+    
+    def assign_package_to_robot(self, package_id, robot_id):
+        """Asigna un paquete a un robot específico"""
+        package = next((p for p in self.packages if p.id == package_id), None)
+        robot = next((r for r in self.robots if r.unique_id == robot_id), None)
+        
+        if not package or not robot:
+            return False
+            
+        if package.status != 'waiting' or robot.carrying_package:
+            return False
+        
+        robot.assign_package(package)
+        # Cambiar el estado idle a False
+        robot.idle = False
+        return True
+        
     def has_obstacle(self, pos):
         """Comprueba si hay un obstáculo en la posición dada"""
         # Asegurar que pos sea una tupla

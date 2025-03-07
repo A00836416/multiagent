@@ -12,7 +12,7 @@
             background-color: #f5f5f5;
         }
         .container {
-            max-width: 1200px;
+            max-width: 1300px;
             margin: 0 auto;
             background-color: white;
             padding: 20px;
@@ -193,6 +193,77 @@
             height: 100%;
             pointer-events: none;
         }
+
+        .delivery-point {
+        background-color: #8BC34A !important; /* Verde para puntos de entrega */
+        color: white;
+        font-size: 1.2em;
+        }  
+    
+        .packages-container {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 4px;
+        }
+    
+        .package {
+            background-color: #f5f5f5;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            border-left: 4px solid #FFC107;
+        }
+        
+        .package.assigned {
+            border-left-color: #2196F3;
+        }
+        
+        .package.picked {
+            border-left-color: #9C27B0;
+        }
+        
+        .stats-container {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+        }
+        
+        .stat-item {
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+            background-color: white;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2196F3;
+        }
+        
+        .robot-carrying {
+            position: relative;
+        }
+
+        .robot.idle {
+            opacity: 0.8;  // Aumentar la opacidad para mayor visibilidad
+            border: 3px dashed #FF0000;  // Borde rojo más grueso para destacar
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);  // Añadir sombra para mayor visibilidad
+        }
+        
+        .robot-carrying::after {
+            content: "📦";
+            position: absolute;
+            top: -15px;
+            right: -10px;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -223,14 +294,7 @@
                     <label for="startY">Inicio Y:</label>
                     <input type="number" id="startY" min="0" max="21" value="1">
                 </div>
-                <div class="control-item">
-                    <label for="goalX">Meta X:</label>
-                    <input type="number" id="goalX" min="0" max="39" value="38">
-                </div>
-                <div class="control-item">
-                    <label for="goalY">Meta Y:</label>
-                    <input type="number" id="goalY" min="0" max="21" value="20">
-                </div>
+                
                 <div class="control-item">
                     <label for="robotColor">Color:</label>
                     <select id="robotColor">
@@ -282,6 +346,28 @@
             <div id="grid"></div>
             <div id="robots-container"></div>
         </div>
+
+        <div class="stats-container">
+            <div class="stat-item">
+                <div>Paquetes Entregados</div>
+                <div class="stat-value" id="total-delivered">0</div>
+            </div>
+            <div class="stat-item">
+                <div>Paquetes Activos</div>
+                <div class="stat-value" id="active-packages">0</div>
+            </div>
+        </div>
+
+        <div>
+            <h2>Sistema de Paquetes</h2>
+            <div class="buttons">
+                <button id="generate-packages-btn">Generar 5 Paquetes</button>
+                <button id="assign-packages-btn">Asignar Paquetes</button>
+            </div>
+            <div id="packages-container" class="packages-container">
+                <p>No hay paquetes pendientes.</p>
+            </div>
+        </div>
         
         <div class="status" id="status">Estado: No inicializado</div>
     </div>
@@ -295,6 +381,8 @@
         let chargingStations = [];
         let isRunning = false;
         let animationInterval = null;
+        let activePackages = [];
+        let deliveredPackages = [];
         
         // Elementos DOM
         const gridElement = document.getElementById('grid');
@@ -369,18 +457,18 @@
         function addRobot() {
             const startX = parseInt(document.getElementById('startX').value);
             const startY = parseInt(document.getElementById('startY').value);
-            const goalX = parseInt(document.getElementById('goalX').value);
-            const goalY = parseInt(document.getElementById('goalY').value);
             const color = document.getElementById('robotColor').value;
             const maxBattery = parseFloat(document.getElementById('maxBattery').value);
             const batteryDrainRate = parseFloat(document.getElementById('batteryDrainRate').value);
             
-            // Validar que las coordenadas estén dentro del grid
+            // Ya no necesitamos meta para un robot idle
+            const goalX = startX;  // La meta inicial es su propia posición (sin movimiento)
+            const goalY = startY;
+            
+            // Validar que las coordenadas de inicio estén dentro del grid
             if (startX >= gridWidth || startY >= gridHeight || 
-                goalX >= gridWidth || goalY >= gridHeight ||
-                startX < 0 || startY < 0 || 
-                goalX < 0 || goalY < 0) {
-                alert('Las posiciones de inicio y meta deben estar dentro del grid');
+                startX < 0 || startY < 0) {
+                alert('La posición de inicio debe estar dentro del grid');
                 return;
             }
             
@@ -399,7 +487,8 @@
                         color: color,
                         max_battery: maxBattery,
                         battery_drain_rate: batteryDrainRate,
-                        battery_level: maxBattery
+                        battery_level: maxBattery,
+                        idle: true  // Indicar que el robot comienza en estado idle
                     })
                 })
                 .then(response => response.json())
@@ -421,16 +510,18 @@
                 robots.push({
                     id: robotId,
                     start: {x: startX, y: startY},
-                    goal: {x: goalX, y: goalY},
+                    goal: {x: startX, y: startY},  // Meta inicial es su propia posición
                     position: {x: startX, y: startY},
                     color: color,
                     max_battery: maxBattery,
                     battery_drain_rate: batteryDrainRate,
                     battery_level: maxBattery,
-                    path: []
+                    path: [],
+                    idle: true
                 });
             }
         }
+
         function isTruckPosition(x, y) {
             return predefinedTruckPositions.some(pos => pos.x === x && pos.y === y);
         }
@@ -741,7 +832,6 @@
         // Crear elementos para los robots
         function createRobotElements() {
             robotsContainer.innerHTML = '';
-            
             robots.forEach(robot => {
                 // Encontrar la celda del robot
                 const cellSelector = `.cell[data-x="${robot.position.x}"][data-y="${robot.position.y}"]`;
@@ -755,6 +845,17 @@
                     const robotElement = document.createElement('div');
                     robotElement.id = `robot-${robot.id}`;
                     robotElement.classList.add('robot');
+
+                    // Asegurarse de que los robots sean visibles incluso en estado idle
+                    if (robot.idle) {
+                        robotElement.classList.add('idle');
+                        // Añadir texto para hacer más visible el robot idle
+                        robotElement.setAttribute('title', 'Robot en espera');
+                    }
+                    
+                    if (robot.carrying_package) {
+                        robotElement.classList.add('robot-carrying');
+                    }
                     
                     // Tamaño basado en el tamaño de la celda
                     const cellSize = cellRect.width;
@@ -798,9 +899,133 @@
                         robotElement.appendChild(chargingIcon);
                     }
                     
+                    // Asegurarse de que el robot siempre se añada al contenedor
                     robotsContainer.appendChild(robotElement);
+                    
+                    // Debug: Añadir un log para verificar que se está creando el robot
+                    console.log(`Robot ${robot.id} creado en posición (${robot.position.x}, ${robot.position.y}), idle: ${robot.idle}`);
+                } else {
+                    console.error(`No se encontró celda para el robot ${robot.id} en posición (${robot.position.x}, ${robot.position.y})`);
                 }
             });
+        }
+
+        // Funciones para manejar paquetes
+        function createPackages(count) {
+            fetch('/create_packages', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    count: count
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    fetchPackagesStatus();
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+
+        function assignPackages() {
+            // Encontrar robots disponibles (sin paquetes asignados)
+            const availableRobots = robots.filter(robot => !robot.carrying_package);
+            if (availableRobots.length === 0) {
+                alert('No hay robots disponibles para asignar paquetes.');
+                return;
+            }
+            
+            // Buscar paquetes por asignar
+            fetch('/get_packages')
+            .then(response => response.json())
+            .then(data => {
+                const unassignedPackages = data.active_packages.filter(p => p.status === 'waiting');
+                
+                if (unassignedPackages.length === 0) {
+                    alert('No hay paquetes pendientes de asignar.');
+                    return;
+                }
+                
+                // Asignar paquetes a robots disponibles
+                let assignCount = 0;
+                for (let i = 0; i < Math.min(availableRobots.length, unassignedPackages.length); i++) {
+                    fetch('/assign_package', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            package_id: unassignedPackages[i].id,
+                            robot_id: availableRobots[i].id
+                        })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            assignCount++;
+                            if (assignCount === Math.min(availableRobots.length, unassignedPackages.length)) {
+                                fetchPackagesStatus();
+                                // Actualizar estado de los robots
+                                fetchState();
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        function fetchPackagesStatus() {
+            fetch('/get_packages')
+            .then(response => response.json())
+            .then(data => {
+                activePackages = data.active_packages;
+                deliveredPackages = data.delivered_packages;
+                updatePackagesUI();
+            });
+        }
+
+        function updatePackagesUI() {
+            const packagesContainer = document.getElementById('packages-container');
+            
+            if (activePackages.length === 0) {
+                packagesContainer.innerHTML = '<p>No hay paquetes pendientes.</p>';
+                return;
+            }
+            
+            let html = '';
+            for (const pkg of activePackages) {
+                const statusClass = pkg.status;
+                html += `
+                    <div class="package ${statusClass}">
+                        <h3>Paquete #${pkg.id}</h3>
+                        <p>Recogida: (${pkg.pickup.x},${pkg.pickup.y})</p>
+                        <p>Entrega: (${pkg.delivery.x},${pkg.delivery.y})</p>
+                        <p>Estado: ${getStatusText(pkg.status)}</p>
+                        ${pkg.assigned_robot_id ? `<p>Asignado a Robot #${pkg.assigned_robot_id}</p>` : ''}
+                    </div>
+                `;
+            }
+            
+            packagesContainer.innerHTML = html;
+            
+            // Actualizar contadores
+            document.getElementById('total-delivered').textContent = deliveredPackages.length;
+            document.getElementById('active-packages').textContent = activePackages.length;
+        }
+
+        function getStatusText(status) {
+            switch(status) {
+                case 'waiting': return 'Esperando asignación';
+                case 'assigned': return 'Asignado (en ruta a recoger)';
+                case 'picked': return 'Recogido (en ruta a entregar)';
+                case 'delivered': return 'Entregado';
+                default: return status;
+            }
         }
         
         // Actualizar texto de estado
@@ -908,7 +1133,21 @@
         window.addEventListener('load', () => {
             // Añadir un robot por defecto
             addRobot();
+            // Añadir event listeners para los botones de paquetes
+            document.getElementById('generate-packages-btn').addEventListener('click', () => {
+                createPackages(5);
+            });
+            document.getElementById('assign-packages-btn').addEventListener('click', assignPackages);
         });
+
+        // Actualizar la función step para verificar estado de paquetes después de cada paso
+        const originalStepFunction = step;
+        step = function() {
+            originalStepFunction();
+            
+            // Después de cada paso, actualizar el estado de los paquetes
+            fetchPackagesStatus();
+        };
     </script>
 </body>
 </html>

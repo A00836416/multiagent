@@ -6,6 +6,7 @@ from flask import Flask, render_template, jsonify, request, send_file
 from pathfinding_model import RobotAgent, ObstacleAgent, ChargingStation, PathFindingModel
 import json
 from flask_cors import CORS  # Para permitir conexiones desde Unity
+import random
 
 app = Flask(__name__)
 CORS(app)  # Habilitar CORS para todas las rutas
@@ -15,6 +16,37 @@ model = None
 obstacles = []
 charging_stations = []
 robots_config = []
+
+# Definir las posiciones de los camiones y puntos de entrega
+truck_positions = [
+    (11, 21), (12, 21), (13, 21), 
+    (26, 21), (27, 21), (28, 21)
+]
+
+delivery_positions = [
+    (2, 14), (2, 16), (2, 18),
+    (3, 14), (3, 16), (3, 18),
+    (5, 14), (5, 16), (5, 18),
+    (6, 14), (6, 16), (6, 18),
+    (10, 2), (10, 3), (10, 4), (10, 5), (10, 6), (10, 7),
+    (13, 2), (13, 3), (13, 4), (13, 5), (13, 6), (13, 7),
+    (16, 2), (16, 3), (16, 4), (16, 5), (16, 6), (16, 7),
+    (32, 14), (32, 16), (32, 18),
+    (33, 14), (33, 16), (33, 18),
+    (35, 14), (35, 16), (35, 18),
+    (36, 14), (36, 16), (36, 18)
+]
+
+# Implementar métodos para el modelo
+def get_truck_positions(model):
+    return truck_positions
+    
+def get_delivery_positions(model):
+    return delivery_positions
+
+# Vincula estos métodos al modelo
+PathFindingModel.get_truck_positions = get_truck_positions
+PathFindingModel.get_delivery_positions = get_delivery_positions
 
 @app.route('/')
 def index():
@@ -254,9 +286,10 @@ def add_robot():
     data = request.json
     start_x = int(data.get('start_x', 0))
     start_y = int(data.get('start_y', 0))
-    goal_x = int(data.get('goal_x', 0))
-    goal_y = int(data.get('goal_y', 0))
+    goal_x = int(data.get('goal_x', start_x))  # Default to start if not specified
+    goal_y = int(data.get('goal_y', start_y))  # Default to start if not specified
     color = data.get('color', "blue")  # Color por defecto
+    idle = data.get('idle', True)  # Por defecto, el robot está en idle
     
     # Parámetros de batería
     max_battery = float(data.get('max_battery', 100))
@@ -282,6 +315,13 @@ def add_robot():
         battery_level=battery_level
     )
     
+    # Establecer estado idle
+    new_robot.idle = idle
+    
+    # Si está en idle, limpiar la ruta
+    if idle:
+        new_robot.path = []
+    
     # Añadir a la lista de robots y al programador
     model.robots.append(new_robot)
     model.schedule.add(new_robot)
@@ -294,14 +334,9 @@ def add_robot():
         'color': color,
         'max_battery': max_battery,
         'battery_drain_rate': battery_drain_rate,
-        'battery_level': battery_level
+        'battery_level': battery_level,
+        'idle': idle
     })
-    
-    if not new_robot.path:
-        return jsonify({
-            'success': False,
-            'error': 'No se pudo encontrar una ruta para el nuevo robot'
-        }), 400
     
     return jsonify({
         'success': True,
@@ -310,13 +345,135 @@ def add_robot():
             'start': {'x': start[0], 'y': start[1]},
             'goal': {'x': goal[0], 'y': goal[1]},
             'position': {'x': start[0], 'y': start[1]},
-            'path': [{'x': pos[0], 'y': pos[1]} for pos in new_robot.path],
+            'path': [{'x': pos[0], 'y': pos[1]} for pos in new_robot.path] if new_robot.path else [],
             'color': color,
             'battery_level': battery_level,
             'max_battery': max_battery,
             'charging': False,
-            'battery_percentage': (battery_level / max_battery) * 100
+            'battery_percentage': (battery_level / max_battery) * 100,
+            'idle': idle
         }
+    })
+
+@app.route('/create_package', methods=['POST'])
+def create_package():
+    """Crea un nuevo paquete"""
+    global model
+    
+    if model is None:
+        return jsonify({'error': 'Modelo no inicializado'}), 400
+    
+    # Si no se especifican ubicaciones, seleccionar aleatoriamente
+    truck_pos = random.choice(truck_positions)
+    delivery_pos = random.choice(delivery_positions)
+    
+    package = model.create_package(truck_pos, delivery_pos)
+    
+    return jsonify({
+        'success': True,
+        'package': {
+            'id': package.id,
+            'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
+            'delivery': {'x': package.delivery_location[0], 'y': package.delivery_location[1]},
+            'status': package.status
+        }
+    })
+
+@app.route('/create_packages', methods=['POST'])
+def create_packages():
+    """Crea múltiples paquetes"""
+    global model
+    
+    if model is None:
+        return jsonify({'error': 'Modelo no inicializado'}), 400
+    
+    data = request.json
+    count = int(data.get('count', 1))
+    
+    packages = []
+    for _ in range(count):
+        truck_pos = random.choice(truck_positions)
+        delivery_pos = random.choice(delivery_positions)
+        package = model.create_package(truck_pos, delivery_pos)
+        packages.append({
+            'id': package.id,
+            'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
+            'delivery': {'x': package.delivery_location[0], 'y': package.delivery_location[1]},
+            'status': package.status
+        })
+    
+    return jsonify({
+        'success': True,
+        'packages': packages
+    })
+
+@app.route('/assign_package', methods=['POST'])
+def assign_package():
+    """Asigna un paquete a un robot"""
+    global model
+    
+    if model is None:
+        return jsonify({'error': 'Modelo no inicializado'}), 400
+    
+    data = request.json
+    package_id = int(data.get('package_id', 0))
+    robot_id = int(data.get('robot_id', 0))
+    
+    success = model.assign_package_to_robot(package_id, robot_id)
+    
+    if not success:
+        return jsonify({
+            'success': False,
+            'error': 'No se pudo asignar el paquete'
+        }), 400
+    
+    robot = next((r for r in model.robots if r.unique_id == robot_id), None)
+    
+    return jsonify({
+        'success': True,
+        'robot': {
+            'id': robot.unique_id,
+            'goal': {'x': robot.goal[0], 'y': robot.goal[1]},
+            'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
+        }
+    })
+
+@app.route('/get_packages', methods=['GET'])
+def get_packages():
+    """Retorna información sobre los paquetes"""
+    global model
+    
+    if model is None:
+        return jsonify({'error': 'Modelo no inicializado'}), 400
+    
+    active_packages = []
+    delivered_packages = []
+    
+    for package in model.packages:
+        if package.status != 'delivered':
+            active_packages.append({
+                'id': package.id,
+                'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
+                'delivery': {'x': package.delivery_location[0], 'y': package.delivery_location[1]},
+                'status': package.status,
+                'assigned_robot_id': package.assigned_robot_id
+            })
+    
+    for package in model.delivered_packages:
+        delivered_packages.append({
+            'id': package.id,
+            'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
+            'delivery': {'x': package.delivery_location[0], 'y': package.delivery_location[1]},
+            'status': package.status,
+            'assigned_robot_id': package.assigned_robot_id,
+            'pickup_time': package.pickup_time,
+            'delivery_time': package.delivery_time
+        })
+    
+    return jsonify({
+        'active_packages': active_packages,
+        'delivered_packages': delivered_packages,
+        'total_delivered': len(delivered_packages)
     })
 
 @app.route('/get_state', methods=['GET'])
@@ -330,7 +487,7 @@ def get_state():
     # Obtener información de todos los robots
     robots_info = []
     for robot in model.robots:
-        robots_info.append({
+        robot_data = {
             'id': robot.unique_id,
             'start': {'x': robot.start[0], 'y': robot.start[1]},
             'goal': {'x': robot.goal[0], 'y': robot.goal[1]},
@@ -342,15 +499,32 @@ def get_state():
             'battery_level': robot.battery_level,
             'max_battery': robot.max_battery,
             'charging': robot.charging,
-            'battery_percentage': (robot.battery_level / robot.max_battery) * 100
-        })
+            'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
+            'total_packages_delivered': robot.total_packages_delivered,
+            'idle': robot.idle  # Añadir el estado idle
+        }
+        
+        # Añadir información del paquete si lo lleva
+        if robot.carrying_package:
+            robot_data['carrying_package'] = {
+                'id': robot.carrying_package.id,
+                'status': robot.carrying_package.status,
+                'pickup': {'x': robot.carrying_package.pickup_location[0], 
+                          'y': robot.carrying_package.pickup_location[1]},
+                'delivery': {'x': robot.carrying_package.delivery_location[0], 
+                           'y': robot.carrying_package.delivery_location[1]}
+            }
+        
+        robots_info.append(robot_data)
     
     return jsonify({
         'grid_size': {'width': model.grid.width, 'height': model.grid.height},
         'robots': robots_info,
         'obstacles': obstacles,
         'charging_stations': charging_stations,
-        'all_reached_goal': model.all_robots_reached_goal()
+        'all_reached_goal': model.all_robots_reached_goal(),
+        'total_packages_delivered': len(model.delivered_packages),
+        'active_packages': len([p for p in model.packages if p.status != 'delivered'])
     })
 
 @app.route('/export_path_coordinates', methods=['GET'])
@@ -415,7 +589,7 @@ if __name__ == '__main__':
             background-color: #f5f5f5;
         }
         .container {
-            max-width: 1200px;
+            max-width: 1300px;
             margin: 0 auto;
             background-color: white;
             padding: 20px;
@@ -596,6 +770,77 @@ if __name__ == '__main__':
             height: 100%;
             pointer-events: none;
         }
+
+        .delivery-point {
+        background-color: #8BC34A !important; /* Verde para puntos de entrega */
+        color: white;
+        font-size: 1.2em;
+        }  
+    
+        .packages-container {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 4px;
+        }
+    
+        .package {
+            background-color: #f5f5f5;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            border-left: 4px solid #FFC107;
+        }
+        
+        .package.assigned {
+            border-left-color: #2196F3;
+        }
+        
+        .package.picked {
+            border-left-color: #9C27B0;
+        }
+        
+        .stats-container {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+        }
+        
+        .stat-item {
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+            background-color: white;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2196F3;
+        }
+        
+        .robot-carrying {
+            position: relative;
+        }
+
+        .robot.idle {
+            opacity: 0.8;  // Aumentar la opacidad para mayor visibilidad
+            border: 3px dashed #FF0000;  // Borde rojo más grueso para destacar
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);  // Añadir sombra para mayor visibilidad
+        }
+        
+        .robot-carrying::after {
+            content: "📦";
+            position: absolute;
+            top: -15px;
+            right: -10px;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -626,14 +871,7 @@ if __name__ == '__main__':
                     <label for="startY">Inicio Y:</label>
                     <input type="number" id="startY" min="0" max="21" value="1">
                 </div>
-                <div class="control-item">
-                    <label for="goalX">Meta X:</label>
-                    <input type="number" id="goalX" min="0" max="39" value="38">
-                </div>
-                <div class="control-item">
-                    <label for="goalY">Meta Y:</label>
-                    <input type="number" id="goalY" min="0" max="21" value="20">
-                </div>
+                
                 <div class="control-item">
                     <label for="robotColor">Color:</label>
                     <select id="robotColor">
@@ -685,6 +923,28 @@ if __name__ == '__main__':
             <div id="grid"></div>
             <div id="robots-container"></div>
         </div>
+
+        <div class="stats-container">
+            <div class="stat-item">
+                <div>Paquetes Entregados</div>
+                <div class="stat-value" id="total-delivered">0</div>
+            </div>
+            <div class="stat-item">
+                <div>Paquetes Activos</div>
+                <div class="stat-value" id="active-packages">0</div>
+            </div>
+        </div>
+
+        <div>
+            <h2>Sistema de Paquetes</h2>
+            <div class="buttons">
+                <button id="generate-packages-btn">Generar 5 Paquetes</button>
+                <button id="assign-packages-btn">Asignar Paquetes</button>
+            </div>
+            <div id="packages-container" class="packages-container">
+                <p>No hay paquetes pendientes.</p>
+            </div>
+        </div>
         
         <div class="status" id="status">Estado: No inicializado</div>
     </div>
@@ -698,6 +958,8 @@ if __name__ == '__main__':
         let chargingStations = [];
         let isRunning = false;
         let animationInterval = null;
+        let activePackages = [];
+        let deliveredPackages = [];
         
         // Elementos DOM
         const gridElement = document.getElementById('grid');
@@ -772,18 +1034,18 @@ if __name__ == '__main__':
         function addRobot() {
             const startX = parseInt(document.getElementById('startX').value);
             const startY = parseInt(document.getElementById('startY').value);
-            const goalX = parseInt(document.getElementById('goalX').value);
-            const goalY = parseInt(document.getElementById('goalY').value);
             const color = document.getElementById('robotColor').value;
             const maxBattery = parseFloat(document.getElementById('maxBattery').value);
             const batteryDrainRate = parseFloat(document.getElementById('batteryDrainRate').value);
             
-            // Validar que las coordenadas estén dentro del grid
+            // Ya no necesitamos meta para un robot idle
+            const goalX = startX;  // La meta inicial es su propia posición (sin movimiento)
+            const goalY = startY;
+            
+            // Validar que las coordenadas de inicio estén dentro del grid
             if (startX >= gridWidth || startY >= gridHeight || 
-                goalX >= gridWidth || goalY >= gridHeight ||
-                startX < 0 || startY < 0 || 
-                goalX < 0 || goalY < 0) {
-                alert('Las posiciones de inicio y meta deben estar dentro del grid');
+                startX < 0 || startY < 0) {
+                alert('La posición de inicio debe estar dentro del grid');
                 return;
             }
             
@@ -802,7 +1064,8 @@ if __name__ == '__main__':
                         color: color,
                         max_battery: maxBattery,
                         battery_drain_rate: batteryDrainRate,
-                        battery_level: maxBattery
+                        battery_level: maxBattery,
+                        idle: true  // Indicar que el robot comienza en estado idle
                     })
                 })
                 .then(response => response.json())
@@ -824,16 +1087,18 @@ if __name__ == '__main__':
                 robots.push({
                     id: robotId,
                     start: {x: startX, y: startY},
-                    goal: {x: goalX, y: goalY},
+                    goal: {x: startX, y: startY},  // Meta inicial es su propia posición
                     position: {x: startX, y: startY},
                     color: color,
                     max_battery: maxBattery,
                     battery_drain_rate: batteryDrainRate,
                     battery_level: maxBattery,
-                    path: []
+                    path: [],
+                    idle: true
                 });
             }
         }
+
         function isTruckPosition(x, y) {
             return predefinedTruckPositions.some(pos => pos.x === x && pos.y === y);
         }
@@ -1144,7 +1409,6 @@ if __name__ == '__main__':
         // Crear elementos para los robots
         function createRobotElements() {
             robotsContainer.innerHTML = '';
-            
             robots.forEach(robot => {
                 // Encontrar la celda del robot
                 const cellSelector = `.cell[data-x="${robot.position.x}"][data-y="${robot.position.y}"]`;
@@ -1158,6 +1422,17 @@ if __name__ == '__main__':
                     const robotElement = document.createElement('div');
                     robotElement.id = `robot-${robot.id}`;
                     robotElement.classList.add('robot');
+
+                    // Asegurarse de que los robots sean visibles incluso en estado idle
+                    if (robot.idle) {
+                        robotElement.classList.add('idle');
+                        // Añadir texto para hacer más visible el robot idle
+                        robotElement.setAttribute('title', 'Robot en espera');
+                    }
+                    
+                    if (robot.carrying_package) {
+                        robotElement.classList.add('robot-carrying');
+                    }
                     
                     // Tamaño basado en el tamaño de la celda
                     const cellSize = cellRect.width;
@@ -1201,9 +1476,133 @@ if __name__ == '__main__':
                         robotElement.appendChild(chargingIcon);
                     }
                     
+                    // Asegurarse de que el robot siempre se añada al contenedor
                     robotsContainer.appendChild(robotElement);
+                    
+                    // Debug: Añadir un log para verificar que se está creando el robot
+                    console.log(`Robot ${robot.id} creado en posición (${robot.position.x}, ${robot.position.y}), idle: ${robot.idle}`);
+                } else {
+                    console.error(`No se encontró celda para el robot ${robot.id} en posición (${robot.position.x}, ${robot.position.y})`);
                 }
             });
+        }
+
+        // Funciones para manejar paquetes
+        function createPackages(count) {
+            fetch('/create_packages', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    count: count
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    fetchPackagesStatus();
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+
+        function assignPackages() {
+            // Encontrar robots disponibles (sin paquetes asignados)
+            const availableRobots = robots.filter(robot => !robot.carrying_package);
+            if (availableRobots.length === 0) {
+                alert('No hay robots disponibles para asignar paquetes.');
+                return;
+            }
+            
+            // Buscar paquetes por asignar
+            fetch('/get_packages')
+            .then(response => response.json())
+            .then(data => {
+                const unassignedPackages = data.active_packages.filter(p => p.status === 'waiting');
+                
+                if (unassignedPackages.length === 0) {
+                    alert('No hay paquetes pendientes de asignar.');
+                    return;
+                }
+                
+                // Asignar paquetes a robots disponibles
+                let assignCount = 0;
+                for (let i = 0; i < Math.min(availableRobots.length, unassignedPackages.length); i++) {
+                    fetch('/assign_package', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            package_id: unassignedPackages[i].id,
+                            robot_id: availableRobots[i].id
+                        })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            assignCount++;
+                            if (assignCount === Math.min(availableRobots.length, unassignedPackages.length)) {
+                                fetchPackagesStatus();
+                                // Actualizar estado de los robots
+                                fetchState();
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        function fetchPackagesStatus() {
+            fetch('/get_packages')
+            .then(response => response.json())
+            .then(data => {
+                activePackages = data.active_packages;
+                deliveredPackages = data.delivered_packages;
+                updatePackagesUI();
+            });
+        }
+
+        function updatePackagesUI() {
+            const packagesContainer = document.getElementById('packages-container');
+            
+            if (activePackages.length === 0) {
+                packagesContainer.innerHTML = '<p>No hay paquetes pendientes.</p>';
+                return;
+            }
+            
+            let html = '';
+            for (const pkg of activePackages) {
+                const statusClass = pkg.status;
+                html += `
+                    <div class="package ${statusClass}">
+                        <h3>Paquete #${pkg.id}</h3>
+                        <p>Recogida: (${pkg.pickup.x},${pkg.pickup.y})</p>
+                        <p>Entrega: (${pkg.delivery.x},${pkg.delivery.y})</p>
+                        <p>Estado: ${getStatusText(pkg.status)}</p>
+                        ${pkg.assigned_robot_id ? `<p>Asignado a Robot #${pkg.assigned_robot_id}</p>` : ''}
+                    </div>
+                `;
+            }
+            
+            packagesContainer.innerHTML = html;
+            
+            // Actualizar contadores
+            document.getElementById('total-delivered').textContent = deliveredPackages.length;
+            document.getElementById('active-packages').textContent = activePackages.length;
+        }
+
+        function getStatusText(status) {
+            switch(status) {
+                case 'waiting': return 'Esperando asignación';
+                case 'assigned': return 'Asignado (en ruta a recoger)';
+                case 'picked': return 'Recogido (en ruta a entregar)';
+                case 'delivered': return 'Entregado';
+                default: return status;
+            }
         }
         
         // Actualizar texto de estado
@@ -1311,7 +1710,21 @@ if __name__ == '__main__':
         window.addEventListener('load', () => {
             // Añadir un robot por defecto
             addRobot();
+            // Añadir event listeners para los botones de paquetes
+            document.getElementById('generate-packages-btn').addEventListener('click', () => {
+                createPackages(5);
+            });
+            document.getElementById('assign-packages-btn').addEventListener('click', assignPackages);
         });
+
+        // Actualizar la función step para verificar estado de paquetes después de cada paso
+        const originalStepFunction = step;
+        step = function() {
+            originalStepFunction();
+            
+            // Después de cada paso, actualizar el estado de los paquetes
+            fetchPackagesStatus();
+        };
     </script>
 </body>
 </html>""")
