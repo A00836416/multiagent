@@ -1,15 +1,27 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# IMPORTANTE: Monkey patch primero, antes de cualquier otra importación
+import eventlet
+eventlet.monkey_patch()
+
+# Ahora importar el resto de módulos
 import os
+import sys
 import time
 import tempfile
 import datetime
-from flask import Flask, render_template, jsonify, request, send_file
-from pathfinding_model import RobotAgent, ObstacleAgent, ChargingStation, PathFindingModel
 import json
-from flask_cors import CORS  # Para permitir conexiones desde Unity
 import random
+from flask import Flask, render_template, request, send_file
+from flask_socketio import SocketIO, emit
+from pathfinding_model import RobotAgent, ObstacleAgent, ChargingStation, PathFindingModel
 
+
+# Crear la aplicación Flask
 app = Flask(__name__)
-CORS(app)  # Habilitar CORS para todas las rutas
+app.config['SECRET_KEY'] = 'robotsimulation2025'  # Clave secreta para sesiones
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Modelo global para mantener el estado
 model = None
@@ -48,17 +60,72 @@ def get_delivery_positions(model):
 PathFindingModel.get_truck_positions = get_truck_positions
 PathFindingModel.get_delivery_positions = get_delivery_positions
 
+# Rutas HTTP básicas
 @app.route('/')
 def index():
-    """Ruta principal que muestra la interfaz"""
+    """Ruta principal que muestra la interfaz web"""
     return render_template('index.html')
 
-@app.route('/init', methods=['POST'])
-def initialize():
+@app.route('/export_path_coordinates', methods=['GET'])
+def export_path_coordinates():
+    """Exporta las coordenadas de las rutas de robots en un formato específico (se mantiene como endpoint HTTP)"""
+    global model
+    
+    if model is None:
+        return "Modelo no inicializado", 400
+    
+    output = []
+    
+    # Procesar cada robot
+    for robot in model.robots:
+        # Extraer coordenadas x e y por separado
+        x_coords = []
+        y_coords = []
+        
+        for pos in robot.path:
+            x_coords.append(str(pos[0]))
+            y_coords.append(str(pos[1]))
+        
+        # Agregar coordenadas en el formato requerido
+        output.append(",".join(x_coords))
+        output.append(",".join(y_coords))
+        output.append("")  # Línea en blanco entre robots
+    
+    # Generar nombre de archivo con timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"TargetPositions_{timestamp}.txt"
+    
+    # Crear archivo en directorio temporal
+    temp_dir = tempfile.gettempdir()
+    file_path = os.path.join(temp_dir, filename)
+    
+    # Guardar el archivo
+    with open(file_path, 'w') as f:
+        f.write('\n'.join(output))
+    
+    # Devolver el archivo para descargar
+    return send_file(file_path, as_attachment=True)
+
+# Eventos de WebSocket
+@socketio.on('connect')
+def handle_connect():
+    """Maneja la conexión de un cliente WebSocket"""
+    print('Cliente conectado con sid:', request.sid)
+    print('Cliente conectado')
+    # Enviar estado actual si el modelo ya está inicializado
+    if model:
+        emit_state()
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Maneja la desconexión de un cliente WebSocket"""
+    print('Cliente desconectado')
+
+@socketio.on('initialize')
+def handle_initialize(data):
     """Inicializa o reinicia el modelo con parámetros dados"""
     global model, obstacles, charging_stations, robots_config
     
-    data = request.json
     width = int(data.get('width', 10))
     height = int(data.get('height', 10))
     robots_config = data.get('robots', [])
@@ -68,7 +135,8 @@ def initialize():
     # Asegurar que todos los robots tengan configuración de inicio y meta
     for i, robot in enumerate(robots_config):
         if 'start' not in robot or 'goal' not in robot:
-            return jsonify({'error': f'Configuración incompleta para el robot {i+1}'}), 400
+            emit('error', {'message': f'Configuración incompleta para el robot {i+1}'})
+            return
     
     # Inicializar el modelo con múltiples robots y estaciones de carga
     model = PathFindingModel(width, height, robots_config, charging_stations_config)
@@ -106,65 +174,42 @@ def initialize():
             'battery_level': robot.battery_level,
             'max_battery': robot.max_battery,
             'charging': robot.charging,
-            'battery_percentage': (robot.battery_level / robot.max_battery) * 100
+            'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
+            'idle': getattr(robot, 'idle', False)
         })
     
-    return jsonify({
-        'success': True,
+    # Emitir evento de inicialización exitosa
+    emit('initialization_complete', {
         'grid_size': {'width': width, 'height': height},
         'robots': robots_info,
         'obstacles': obstacles,
         'charging_stations': charging_stations
     })
 
-@app.route('/step', methods=['POST'])
-def step():
+@socketio.on('step')
+def handle_step():
     """Avanza un paso en la simulación"""
     global model
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
     
     # Ejecutar un paso
     model.step()
     
-    # Obtener información actualizada de todos los robots
-    robots_info = []
-    all_reached_goal = True
+    # Emitir el estado actualizado
+    emit_robots_update()
     
-    for robot in model.robots:
-        reached_goal = robot.reached_goal
-        all_reached_goal = all_reached_goal and reached_goal
-        
-        robots_info.append({
-            'id': robot.unique_id,
-            'position': {'x': robot.pos[0], 'y': robot.pos[1]},
-            'reached_goal': reached_goal,
-            'steps_left': len(robot.path) - 1 if robot.path else 0,
-            'steps_taken': robot.steps_taken,
-            'battery_level': robot.battery_level,
-            'max_battery': robot.max_battery,
-            'charging': robot.charging,
-            'status': 'charging' if robot.charging else 'goal_reached' if robot.reached_goal else 'moving',
-            'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
-            'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]  # Incluir la ruta actualizada
-        })
-    
-    return jsonify({
-        'success': True,
-        'robots': robots_info,
-        'all_reached_goal': all_reached_goal
-    })
-
-@app.route('/change_goal', methods=['POST'])
-def change_goal():
+@socketio.on('change_goal')
+def handle_change_goal(data):
     """Cambia la meta de un robot"""
     global model
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
     
-    data = request.json
     robot_id = int(data.get('robot_id', 0))
     goal_x = int(data.get('goal_x', 0))
     goal_y = int(data.get('goal_y', 0))
@@ -172,31 +217,34 @@ def change_goal():
     # Encontrar el robot
     robot = next((r for r in model.robots if r.unique_id == robot_id), None)
     if not robot:
-        return jsonify({'error': f'Robot {robot_id} no encontrado'}), 404
+        emit('error', {'message': f'Robot {robot_id} no encontrado'})
+        return
     
     # Cambiar la meta y recalcular la ruta
     success = robot.change_goal((goal_x, goal_y))
     
     if not success:
-        return jsonify({
-            'success': False,
-            'error': 'No se pudo encontrar ruta a la nueva meta'
-        }), 400
+        emit('error', {'message': 'No se pudo encontrar ruta a la nueva meta'})
+        return
     
-    return jsonify({
-        'success': True,
+    emit('goal_changed', {
+        'robot_id': robot_id,
+        'goal': {'x': goal_x, 'y': goal_y},
         'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
     })
+    
+    # También emitir actualización de estado general
+    emit_robots_update()
 
-@app.route('/add_obstacle', methods=['POST'])
-def add_obstacle():
+@socketio.on('add_obstacle')
+def handle_add_obstacle(data):
     """Añade un obstáculo en la posición especificada"""
     global model, obstacles
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
     
-    data = request.json
     x = int(data.get('x', 0))
     y = int(data.get('y', 0))
     
@@ -210,39 +258,33 @@ def add_obstacle():
         robots_paths = []
         for robot in model.robots:
             if not robot.path:
-                return jsonify({
-                    'success': False,
-                    'error': f'No se pudo encontrar una ruta para el robot {robot.unique_id} al añadir el obstáculo'
-                }), 400
+                emit('error', {'message': f'No se pudo encontrar una ruta para el robot {robot.unique_id} al añadir el obstáculo'})
+                return
             
             robots_paths.append({
                 'id': robot.unique_id,
                 'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
             })
         
-        return jsonify({
-            'success': True,
+        emit('obstacle_added', {
+            'obstacle': {'x': x, 'y': y},
             'obstacles': obstacles,
             'robots_paths': robots_paths
         })
     else:
-        return jsonify({
-            'success': False,
-            'error': 'No se puede añadir obstáculo en la posición especificada'
-        }), 400
+        emit('error', {'message': 'No se puede añadir obstáculo en la posición especificada'})
 
-@app.route('/add_charging_station', methods=['POST'])
-def add_charging_station():
+@socketio.on('add_charging_station')
+def handle_add_charging_station(data):
     """Añade una estación de carga en la posición especificada"""
     global model, charging_stations
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
     
-    data = request.json
     x = int(data.get('x', 0))
     y = int(data.get('y', 0))
-    charging_rate = float(data.get('charging_rate', 10))
     
     # Añadir estación de carga
     success = model.add_charging_station((x, y))
@@ -264,26 +306,23 @@ def add_charging_station():
                 'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
             })
             
-        return jsonify({
-            'success': True,
+        emit('charging_station_added', {
+            'charging_station': {'x': x, 'y': y},
             'charging_stations': charging_stations,
-            'robots_paths': robots_paths  # Incluir rutas actualizadas
+            'robots_paths': robots_paths
         })
     else:
-        return jsonify({
-            'success': False,
-            'error': 'No se puede añadir estación de carga en la posición especificada'
-        }), 400
+        emit('error', {'message': 'No se puede añadir estación de carga en la posición especificada'})
 
-@app.route('/add_robot', methods=['POST'])
-def add_robot():
+@socketio.on('add_robot')
+def handle_add_robot(data):
     """Añade un nuevo robot a la simulación"""
     global model, robots_config
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
     
-    data = request.json
     start_x = int(data.get('start_x', 0))
     start_y = int(data.get('start_y', 0))
     goal_x = int(data.get('goal_x', start_x))  # Default to start if not specified
@@ -301,10 +340,8 @@ def add_robot():
     
     # Verificar que las posiciones no estén ocupadas por obstáculos
     if model.has_obstacle(start) or model.has_obstacle(goal):
-        return jsonify({
-            'success': False,
-            'error': 'Las posiciones de inicio o meta están ocupadas por obstáculos'
-        }), 400
+        emit('error', {'message': 'Las posiciones de inicio o meta están ocupadas por obstáculos'})
+        return
     
     # Crear nuevo robot
     new_robot_id = len(model.robots) + 1
@@ -338,8 +375,7 @@ def add_robot():
         'idle': idle
     })
     
-    return jsonify({
-        'success': True,
+    emit('robot_added', {
         'robot': {
             'id': new_robot.unique_id,
             'start': {'x': start[0], 'y': start[1]},
@@ -355,13 +391,14 @@ def add_robot():
         }
     })
 
-@app.route('/create_package', methods=['POST'])
-def create_package():
+@socketio.on('create_package')
+def handle_create_package():
     """Crea un nuevo paquete"""
     global model
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
     
     # Si no se especifican ubicaciones, seleccionar aleatoriamente
     truck_pos = random.choice(truck_positions)
@@ -369,8 +406,7 @@ def create_package():
     
     package = model.create_package(truck_pos, delivery_pos)
     
-    return jsonify({
-        'success': True,
+    emit('package_created', {
         'package': {
             'id': package.id,
             'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
@@ -378,16 +414,19 @@ def create_package():
             'status': package.status
         }
     })
+    
+    # También emitir el estado actualizado de paquetes
+    emit_packages_update()
 
-@app.route('/create_packages', methods=['POST'])
-def create_packages():
+@socketio.on('create_packages')
+def handle_create_packages(data):
     """Crea múltiples paquetes"""
     global model
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
     
-    data = request.json
     count = int(data.get('count', 1))
     
     packages = []
@@ -402,49 +441,148 @@ def create_packages():
             'status': package.status
         })
     
-    return jsonify({
-        'success': True,
+    emit('packages_created', {
         'packages': packages
     })
+    
+    # También emitir el estado actualizado de paquetes
+    emit_packages_update()
 
-@app.route('/assign_package', methods=['POST'])
-def assign_package():
+@socketio.on('assign_package')
+def handle_assign_package(data):
     """Asigna un paquete a un robot"""
     global model
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
     
-    data = request.json
     package_id = int(data.get('package_id', 0))
     robot_id = int(data.get('robot_id', 0))
     
     success = model.assign_package_to_robot(package_id, robot_id)
     
     if not success:
-        return jsonify({
-            'success': False,
-            'error': 'No se pudo asignar el paquete'
-        }), 400
+        emit('error', {'message': 'No se pudo asignar el paquete'})
+        return
     
     robot = next((r for r in model.robots if r.unique_id == robot_id), None)
     
-    return jsonify({
-        'success': True,
+    emit('package_assigned', {
+        'package_id': package_id,
         'robot': {
             'id': robot.unique_id,
             'goal': {'x': robot.goal[0], 'y': robot.goal[1]},
             'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
         }
     })
+    
+    # También emitir actualizaciones generales
+    emit_robots_update()
+    emit_packages_update()
 
-@app.route('/get_packages', methods=['GET'])
-def get_packages():
+@socketio.on('get_packages')
+def handle_get_packages():
     """Retorna información sobre los paquetes"""
+    emit_packages_update()
+
+@socketio.on('get_state')
+def handle_get_state():
+    """Devuelve el estado actual del modelo"""
+    emit_state()
+
+# Funciones de emisión de eventos
+def emit_state():
+    """Emite el estado completo del modelo"""
+    global model, obstacles, charging_stations
+    
+    if model is None:
+        return
+    
+    # Obtener información de todos los robots
+    robots_info = []
+    for robot in model.robots:
+        robot_data = {
+            'id': robot.unique_id,
+            'start': {'x': robot.start[0], 'y': robot.start[1]},
+            'goal': {'x': robot.goal[0], 'y': robot.goal[1]},
+            'position': {'x': robot.pos[0], 'y': robot.pos[1]},
+            'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path],
+            'reached_goal': robot.reached_goal,
+            'steps_taken': robot.steps_taken,
+            'color': robot.color,
+            'battery_level': robot.battery_level,
+            'max_battery': robot.max_battery,
+            'charging': robot.charging,
+            'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
+            'total_packages_delivered': robot.total_packages_delivered,
+            'idle': getattr(robot, 'idle', False)  # Obtener atributo idle, default False si no existe
+        }
+        
+        # Añadir información del paquete si lo lleva
+        if robot.carrying_package:
+            robot_data['carrying_package'] = {
+                'id': robot.carrying_package.id,
+                'status': robot.carrying_package.status,
+                'pickup': {'x': robot.carrying_package.pickup_location[0], 
+                          'y': robot.carrying_package.pickup_location[1]},
+                'delivery': {'x': robot.carrying_package.delivery_location[0], 
+                           'y': robot.carrying_package.delivery_location[1]}
+            }
+        
+        robots_info.append(robot_data)
+    
+    socketio.emit('state_update', {
+        'grid_size': {'width': model.grid.width, 'height': model.grid.height},
+        'robots': robots_info,
+        'obstacles': obstacles,
+        'charging_stations': charging_stations,
+        'all_reached_goal': model.all_robots_reached_goal(),
+        'total_packages_delivered': len(model.delivered_packages),
+        'active_packages': len([p for p in model.packages if p.status != 'delivered'])
+    })
+
+def emit_robots_update():
+    """Emite información actualizada de todos los robots"""
     global model
     
     if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
+        return
+    
+    # Obtener información actualizada de todos los robots
+    robots_info = []
+    all_reached_goal = True
+    
+    for robot in model.robots:
+        reached_goal = robot.reached_goal
+        all_reached_goal = all_reached_goal and reached_goal
+        
+        robots_info.append({
+            'id': robot.unique_id,
+            'position': {'x': robot.pos[0], 'y': robot.pos[1]},
+            'reached_goal': reached_goal,
+            'steps_left': len(robot.path) - 1 if robot.path else 0,
+            'steps_taken': robot.steps_taken,
+            'battery_level': robot.battery_level,
+            'max_battery': robot.max_battery,
+            'charging': robot.charging,
+            'status': 'charging' if robot.charging else 'goal_reached' if robot.reached_goal else 'moving',
+            'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
+            'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path],  # Incluir la ruta actualizada
+            'idle': getattr(robot, 'idle', False)  # Atributo idle
+        })
+    
+    socketio.emit('robots_update', {
+        'robots': robots_info,
+        'all_reached_goal': all_reached_goal
+    })
+
+def emit_packages_update():
+    """Emite información actualizada de los paquetes"""
+    global model
+    
+    if model is None:
+        return
     
     active_packages = []
     delivered_packages = []
@@ -470,117 +608,74 @@ def get_packages():
             'delivery_time': package.delivery_time
         })
     
-    return jsonify({
+    socketio.emit('packages_update', {
         'active_packages': active_packages,
         'delivered_packages': delivered_packages,
         'total_delivered': len(delivered_packages)
     })
 
-@app.route('/get_state', methods=['GET'])
-def get_state():
-    """Devuelve el estado actual del modelo"""
-    global model, obstacles, charging_stations
-    
-    if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
-    
-    # Obtener información de todos los robots
-    robots_info = []
-    for robot in model.robots:
-        robot_data = {
-            'id': robot.unique_id,
-            'start': {'x': robot.start[0], 'y': robot.start[1]},
-            'goal': {'x': robot.goal[0], 'y': robot.goal[1]},
-            'position': {'x': robot.pos[0], 'y': robot.pos[1]},
-            'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path],
-            'reached_goal': robot.reached_goal,
-            'steps_taken': robot.steps_taken,
-            'color': robot.color,
-            'battery_level': robot.battery_level,
-            'max_battery': robot.max_battery,
-            'charging': robot.charging,
-            'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
-            'total_packages_delivered': robot.total_packages_delivered,
-            'idle': robot.idle  # Añadir el estado idle
-        }
-        
-        # Añadir información del paquete si lo lleva
-        if robot.carrying_package:
-            robot_data['carrying_package'] = {
-                'id': robot.carrying_package.id,
-                'status': robot.carrying_package.status,
-                'pickup': {'x': robot.carrying_package.pickup_location[0], 
-                          'y': robot.carrying_package.pickup_location[1]},
-                'delivery': {'x': robot.carrying_package.delivery_location[0], 
-                           'y': robot.carrying_package.delivery_location[1]}
-            }
-        
-        robots_info.append(robot_data)
-    
-    return jsonify({
-        'grid_size': {'width': model.grid.width, 'height': model.grid.height},
-        'robots': robots_info,
-        'obstacles': obstacles,
-        'charging_stations': charging_stations,
-        'all_reached_goal': model.all_robots_reached_goal(),
-        'total_packages_delivered': len(model.delivered_packages),
-        'active_packages': len([p for p in model.packages if p.status != 'delivered'])
-    })
-
-@app.route('/export_path_coordinates', methods=['GET'])
-def export_path_coordinates():
-    """Exporta las coordenadas de las rutas de robots en un formato específico"""
+# Función para la automatización de pasos
+def run_simulation_step():
+    """Ejecuta un paso de la simulación automática"""
     global model
     
-    if model is None:
-        return jsonify({'error': 'Modelo no inicializado'}), 400
-    
-    output = []
-    
-    # Procesar cada robot
-    for robot in model.robots:
-        # Extraer coordenadas x e y por separado
-        x_coords = []
-        y_coords = []
+    if model is None or model.all_robots_reached_goal():
+        return False
         
-        for pos in robot.path:
-            x_coords.append(str(pos[0]))
-            y_coords.append(str(pos[1]))
-        
-        # Agregar coordenadas en el formato requerido
-        output.append(",".join(x_coords))
-        output.append(",".join(y_coords))
-        output.append("")  # Línea en blanco entre robots
+    # Ejecutar un paso
+    model.step()
     
-    # Generar nombre de archivo con timestamp
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"TargetPositions_{timestamp}.txt"
+    # Emitir actualizaciones
+    emit_robots_update()
+    emit_packages_update()
     
-    # Crear archivo en directorio temporal
-    temp_dir = tempfile.gettempdir()
-    file_path = os.path.join(temp_dir, filename)
-    
-    # Guardar el archivo
-    with open(file_path, 'w') as f:
-        f.write('\n'.join(output))
-    
-    # Devolver el archivo para descargar
-    return send_file(file_path, as_attachment=True)
+    return True
 
+# Eventos para control de simulación automática
+@socketio.on('start_simulation')
+def handle_start_simulation():
+    """Inicia la simulación automática"""
+    if model is None:
+        emit('error', {'message': 'Modelo no inicializado'})
+        return
+    
+    # Usar un enfoque simplificado que funciona mejor con eventlet
+    # En lugar de background_task, usamos un bucle que se ejecuta directamente
+    def simulation_loop():
+        while True:
+            if not run_simulation_step():
+                # Si los robots alcanzaron su meta, detener simulación
+                socketio.emit('simulation_stopped', {'reason': 'completed'})
+                break
+            eventlet.sleep(1)  # Esperar 1 segundo entre pasos
+    
+    # Iniciar la simulación en un green thread de eventlet
+    eventlet.spawn(simulation_loop)
+    emit('simulation_started', {'message': 'Simulación iniciada'})
+
+@socketio.on('stop_simulation')
+def handle_stop_simulation():
+    """Detiene la simulación automática"""
+    # La simulación se detendrá cuando el cliente se desconecte o
+    # cuando los robots alcancen su meta
+    emit('simulation_stopped', {'reason': 'user_request'})
+
+# Código para generar la plantilla HTML cuando se ejecuta el servidor
 if __name__ == '__main__':
     # Crear el directorio templates si no existe
-    import os
     if not os.path.exists('templates'):
         os.makedirs('templates')
     
-    # Generar la interfaz HTML con funciones para el nuevo sistema de coordenadas
+    # Generar la interfaz HTML con funciones WebSocket
     with open('templates/index.html', 'w') as f:
         f.write("""<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Simulación de Robots con Batería</title>
+    <title>Simulación de Robots con WebSockets</title>
+    <!-- Agregar Socket.IO -->
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -769,6 +864,7 @@ if __name__ == '__main__':
             width: 100%;
             height: 100%;
             pointer-events: none;
+            z-index: 100;
         }
 
         .delivery-point {
@@ -829,9 +925,9 @@ if __name__ == '__main__':
         }
 
         .robot.idle {
-            opacity: 0.8;  // Aumentar la opacidad para mayor visibilidad
-            border: 3px dashed #FF0000;  // Borde rojo más grueso para destacar
-            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);  // Añadir sombra para mayor visibilidad
+            opacity: 0.8;
+            border: 3px dashed #FF0000;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
         }
         
         .robot-carrying::after {
@@ -841,11 +937,31 @@ if __name__ == '__main__':
             right: -10px;
             font-size: 12px;
         }
+
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        
+        .connected {
+            background-color: #4CAF50;
+            color: white;
+        }
+        
+        .disconnected {
+            background-color: #f44336;
+            color: white;
+        }
     </style>
 </head>
 <body>
+    <div id="connection-status" class="connection-status disconnected">Desconectado</div>
     <div class="container">
-        <h1>Simulación de Robots con Batería</h1>
+        <h1>Simulación de Robots</h1>
         
         <div class="controls">
             <div class="control-group">
@@ -950,6 +1066,17 @@ if __name__ == '__main__':
     </div>
 
     <script>
+        // Conexión WebSocket
+        const socket = io('http://localhost:8080', {
+            transports: ['websocket'],
+            upgrade: false,
+            reconnection: true,
+            reconnectionAttempts: 5
+        });
+
+
+        const connectionStatus = document.getElementById('connection-status');
+        
         // Variables globales
         let gridWidth = 40;
         let gridHeight = 22;
@@ -957,7 +1084,6 @@ if __name__ == '__main__':
         let obstacles = [];
         let chargingStations = [];
         let isRunning = false;
-        let animationInterval = null;
         let activePackages = [];
         let deliveredPackages = [];
         
@@ -1028,7 +1154,156 @@ if __name__ == '__main__':
             {x: 35, y: 14}, {x: 35, y: 16}, {x: 35, y: 18},
             {x: 36, y: 14}, {x: 36, y: 16}, {x: 36, y: 18}
         ];
+        
+        // Eventos de Socket.IO
+        socket.on('connect', () => {
+            console.log('Conectado al servidor WebSocket');
+            connectionStatus.textContent = 'Conectado';
+            connectionStatus.className = 'connection-status connected';
+            updateStatus('Conectado al servidor. Listo para inicializar.');
+        });
+        
+        socket.on('disconnect', () => {
+            console.log('Desconectado del servidor WebSocket');
+            connectionStatus.textContent = 'Desconectado';
+            connectionStatus.className = 'connection-status disconnected';
+            updateStatus('Desconectado del servidor.');
+            stopSimulation();
+        });
+        
+        socket.on('error', (data) => {
+            console.error('Error:', data.message);
+            updateStatus(`Error: ${data.message}`);
+        });
+        
+        socket.on('initialization_complete', (data) => {
+            console.log('Inicialización completada:', data);
+            robots = data.robots;
+            obstacles = data.obstacles;
+            chargingStations = data.charging_stations;
+            
+            updateGrid();
+            updateStatus('Modelo inicializado con obstáculos y estaciones de carga predefinidos. Listo para iniciar la simulación.');
+            startButton.disabled = false;
+            stepButton.disabled = false;
+            resetButton.disabled = false;
+            exportCoordsButton.disabled = false;
+        });
+        
+        socket.on('robots_update', (data) => {
+            // Actualizar la información de los robots
+            data.robots.forEach(robotUpdate => {
+                const robot = robots.find(r => r.id === robotUpdate.id);
+                if (robot) {
+                    robot.position = robotUpdate.position;
+                    robot.reached_goal = robotUpdate.reached_goal;
+                    robot.steps_taken = robotUpdate.steps_taken;
+                    robot.battery_level = robotUpdate.battery_level;
+                    robot.charging = robotUpdate.charging;
+                    robot.path = robotUpdate.path;
+                    robot.idle = robotUpdate.idle;
+                }
+            });
+            
+            // Actualizar la UI
+            createRobotElements();
+            updatePaths();
+            
+            if (data.all_reached_goal) {
+                updateStatus('¡Todos los robots han alcanzado sus metas!');
+                stopSimulation();
+            } else {
+                const robotsInProgress = robots.filter(r => !r.reached_goal).length;
+                updateStatus(`${robotsInProgress} robots en movimiento. ${robots.length - robotsInProgress} han llegado a la meta.`);
+            }
+        });
+        
+        socket.on('packages_update', (data) => {
+            activePackages = data.active_packages;
+            deliveredPackages = data.delivered_packages;
+            updatePackagesUI();
+        });
+        
+        socket.on('state_update', (data) => {
+            // Actualización completa del estado
+            robots = data.robots;
+            obstacles = data.obstacles;
+            chargingStations = data.charging_stations;
+            
+            // Actualizar todas las vistas
+            updateGrid();
+            updateStatus(`Total paquetes entregados: ${data.total_packages_delivered}. Activos: ${data.active_packages}`);
+            
+            // Actualizar contadores
+            document.getElementById('total-delivered').textContent = data.total_packages_delivered;
+            document.getElementById('active-packages').textContent = data.active_packages;
+        });
+        
+        socket.on('simulation_complete', (data) => {
+            updateStatus(data.message);
+            stopSimulation();
+        });
+        
+        socket.on('simulation_stopped', (data) => {
+            stopSimulation();
+            if (data.reason === 'completed') {
+                updateStatus('Simulación completada. Todos los robots han alcanzado sus metas.');
+            } else {
+                updateStatus('Simulación detenida por el usuario.');
+            }
+        });
 
+        socket.on('obstacle_added', (data) => {
+            obstacles = data.obstacles;
+            
+            // Actualizar rutas de los robots
+            data.robots_paths.forEach(robotPath => {
+                const robot = robots.find(r => r.id === robotPath.id);
+                if (robot) {
+                    robot.path = robotPath.path;
+                }
+            });
+            
+            updateGrid();
+            updatePaths();
+        });
+        
+        socket.on('charging_station_added', (data) => {
+            chargingStations = data.charging_stations;
+            
+            // Actualizar rutas de los robots
+            data.robots_paths.forEach(robotPath => {
+                const robot = robots.find(r => r.id === robotPath.id);
+                if (robot) {
+                    robot.path = robotPath.path;
+                }
+            });
+            
+            updateGrid();
+            updatePaths();
+        });
+        
+        socket.on('robot_added', (data) => {
+            robots.push(data.robot);
+            updateGrid();
+        });
+        
+        socket.on('package_created', (data) => {
+            fetchPackagesStatus();
+        });
+        
+        socket.on('packages_created', (data) => {
+            fetchPackagesStatus();
+        });
+        
+        socket.on('package_assigned', (data) => {
+            const robot = robots.find(r => r.id === data.robot.id);
+            if (robot) {
+                robot.goal = data.robot.goal;
+                robot.path = data.robot.path;
+            }
+            fetchPackagesStatus();
+        });
         
         // Función para añadir un robot
         function addRobot() {
@@ -1051,35 +1326,16 @@ if __name__ == '__main__':
             
             // Si el modelo ya está inicializado, añadir robot al backend
             if (startButton.disabled === false) {
-                fetch('/add_robot', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        start_x: startX,
-                        start_y: startY,
-                        goal_x: goalX,
-                        goal_y: goalY,
-                        color: color,
-                        max_battery: maxBattery,
-                        battery_drain_rate: batteryDrainRate,
-                        battery_level: maxBattery,
-                        idle: true  // Indicar que el robot comienza en estado idle
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        robots.push(data.robot);
-                        updateGrid();
-                    } else {
-                        alert(data.error || 'No se pudo añadir el robot');
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    alert('Error al comunicarse con el servidor');
+                socket.emit('add_robot', {
+                    start_x: startX,
+                    start_y: startY,
+                    goal_x: goalX,
+                    goal_y: goalY,
+                    color: color,
+                    max_battery: maxBattery,
+                    battery_drain_rate: batteryDrainRate,
+                    battery_level: maxBattery,
+                    idle: true  // Indicar que el robot comienza en estado idle
                 });
             } else {
                 // Si el modelo no está inicializado, solo añadirlo a la lista local
@@ -1102,6 +1358,7 @@ if __name__ == '__main__':
         function isTruckPosition(x, y) {
             return predefinedTruckPositions.some(pos => pos.x === x && pos.y === y);
         }
+        
         // Función para añadir una estación de carga
         function addChargingStation() {
             const x = parseInt(document.getElementById('stationX').value);
@@ -1115,28 +1372,9 @@ if __name__ == '__main__':
             
             // Si el modelo ya está inicializado, añadir estación al backend
             if (startButton.disabled === false) {
-                fetch('/add_charging_station', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        x: x,
-                        y: y
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        chargingStations = data.charging_stations;
-                        updateGrid();
-                    } else {
-                        alert(data.error || 'No se pudo añadir la estación de carga');
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    alert('Error al comunicarse con el servidor');
+                socket.emit('add_charging_station', {
+                    x: x,
+                    y: y
                 });
             } else {
                 // Si el modelo no está inicializado, solo añadirlo a la lista local
@@ -1165,51 +1403,24 @@ if __name__ == '__main__':
                 station => station.x < gridWidth && station.y < gridHeight && station.x >= 0 && station.y >= 0
             );
             
-            // Inicializar el modelo en el backend
-            fetch('/init', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    width: gridWidth,
-                    height: gridHeight,
-                    robots: robots.map(robot => ({
-                        start: [robot.start.x, robot.start.y],
-                        goal: [robot.goal.x, robot.goal.y],
-                        color: robot.color,
-                        max_battery: robot.max_battery,
-                        battery_drain_rate: robot.battery_drain_rate,
-                        battery_level: robot.battery_level
-                    })),
-                    charging_stations: validChargingStations.map(station => [station.x, station.y]),
-                    obstacles: validObstacles
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    // Actualizar información desde el backend
-                    robots = data.robots;
-                    chargingStations = data.charging_stations;
-                    obstacles = data.obstacles;
-                    
-                    // Actualizar la UI
-                    updateGrid();
-                    updateStatus('Modelo inicializado con obstáculos y estaciones de carga predefinidos. Listo para iniciar la simulación.');
-                    startButton.disabled = false;
-                    stepButton.disabled = false;
-                    resetButton.disabled = false;
-                    exportCoordsButton.disabled = false;
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                updateStatus('Error al inicializar el modelo.');
+            // Enviar evento de inicialización al servidor WebSocket
+            socket.emit('initialize', {
+                width: gridWidth,
+                height: gridHeight,
+                robots: robots.map(robot => ({
+                    start: [robot.start.x, robot.start.y],
+                    goal: [robot.goal.x, robot.goal.y],
+                    color: robot.color,
+                    max_battery: robot.max_battery,
+                    battery_drain_rate: robot.battery_drain_rate,
+                    battery_level: robot.battery_level
+                })),
+                charging_stations: validChargingStations.map(station => [station.x, station.y]),
+                obstacles: validObstacles
             });
         }
 
-                // Añadir después de inicializar
+        // Añadir después de inicializar
         window.addEventListener('load', () => {
             // Añadir un botón al final de la sección de botones
             const buttonsDiv = document.querySelector('.buttons');
@@ -1229,6 +1440,13 @@ if __name__ == '__main__':
                 }, 500);
             });
         });
+
+        // Función para agregar obstáculos predefinidos
+        function addPredefinedObstacles() {
+            for (const obs of predefinedObstacles) {
+                socket.emit('add_obstacle', { x: obs.x, y: obs.y });
+            }
+        }
 
         // Reiniciar la simulación
         function resetSimulation() {
@@ -1326,38 +1544,8 @@ if __name__ == '__main__':
                         const isObstacle = obstacles.some(o => o.x === cellX && o.y === cellY);
                         
                         if (!isObstacle) {
-                            // Añadir obstáculo al backend
-                            fetch('/add_obstacle', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                },
-                                body: JSON.stringify({ x: cellX, y: cellY })
-                            })
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.success) {
-                                    // Actualizar UI
-                                    obstacles = data.obstacles;
-                                    
-                                    // Actualizar rutas de los robots
-                                    for (const robotPath of data.robots_paths) {
-                                        const robot = robots.find(r => r.id === robotPath.id);
-                                        if (robot) {
-                                            robot.path = robotPath.path;
-                                        }
-                                    }
-                                    
-                                    updateGrid();
-                                    updatePaths();
-                                } else {
-                                    alert(data.error || 'No se pudo añadir el obstáculo');
-                                }
-                            })
-                            .catch(error => {
-                                console.error('Error:', error);
-                                alert('Error al comunicarse con el servidor');
-                            });
+                            // Añadir obstáculo usando WebSocket
+                            socket.emit('add_obstacle', { x: cellX, y: cellY });
                         }
                     });
                     
@@ -1489,23 +1677,8 @@ if __name__ == '__main__':
 
         // Funciones para manejar paquetes
         function createPackages(count) {
-            fetch('/create_packages', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    count: count
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    fetchPackagesStatus();
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
+            socket.emit('create_packages', {
+                count: count
             });
         }
 
@@ -1517,10 +1690,11 @@ if __name__ == '__main__':
                 return;
             }
             
-            // Buscar paquetes por asignar
-            fetch('/get_packages')
-            .then(response => response.json())
-            .then(data => {
+            // Buscar paquetes por asignar emitiendo un evento
+            socket.emit('get_packages');
+            
+            // El resto se maneja en los eventos: 'packages_update', 'package_assigned'
+            socket.once('packages_update', (data) => {
                 const unassignedPackages = data.active_packages.filter(p => p.status === 'waiting');
                 
                 if (unassignedPackages.length === 0) {
@@ -1529,41 +1703,21 @@ if __name__ == '__main__':
                 }
                 
                 // Asignar paquetes a robots disponibles
-                let assignCount = 0;
                 for (let i = 0; i < Math.min(availableRobots.length, unassignedPackages.length); i++) {
-                    fetch('/assign_package', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            package_id: unassignedPackages[i].id,
-                            robot_id: availableRobots[i].id
-                        })
-                    })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success) {
-                            assignCount++;
-                            if (assignCount === Math.min(availableRobots.length, unassignedPackages.length)) {
-                                fetchPackagesStatus();
-                                // Actualizar estado de los robots
-                                fetchState();
-                            }
-                        }
+                    socket.emit('assign_package', {
+                        package_id: unassignedPackages[i].id,
+                        robot_id: availableRobots[i].id
                     });
                 }
             });
         }
 
         function fetchPackagesStatus() {
-            fetch('/get_packages')
-            .then(response => response.json())
-            .then(data => {
-                activePackages = data.active_packages;
-                deliveredPackages = data.delivered_packages;
-                updatePackagesUI();
-            });
+            socket.emit('get_packages');
+        }
+
+        function fetchState() {
+            socket.emit('get_state');
         }
 
         function updatePackagesUI() {
@@ -1612,46 +1766,9 @@ if __name__ == '__main__':
         
         // Función para ejecutar un paso
         function step() {
-            fetch('/step', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    // Actualizar la información de los robots
-                    data.robots.forEach(robotUpdate => {
-                        const robot = robots.find(r => r.id === robotUpdate.id);
-                        if (robot) {
-                            robot.position = robotUpdate.position;
-                            robot.reached_goal = robotUpdate.reached_goal;
-                            robot.steps_taken = robotUpdate.steps_taken;
-                            robot.battery_level = robotUpdate.battery_level;
-                            robot.charging = robotUpdate.charging;
-                            robot.path = robotUpdate.path; // Actualizar la ruta
-                        }
-                    });
-                    
-                    // Actualizar la UI
-                    createRobotElements();
-                    updatePaths(); // Añadido: actualizar las rutas
-                    
-                    if (data.all_reached_goal) {
-                        updateStatus('¡Todos los robots han alcanzado sus metas!');
-                        stopSimulation();
-                    } else {
-                        const robotsInProgress = robots.filter(r => !r.reached_goal).length;
-                        updateStatus(`${robotsInProgress} robots en movimiento. ${robots.length - robotsInProgress} han llegado a la meta.`);
-                    }
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                updateStatus('Error al ejecutar un paso.');
-                stopSimulation();
-            });
+            socket.emit('step');
+            // Después de cada paso, actualizar el estado de los paquetes
+            setTimeout(fetchPackagesStatus, 200);
         }
         
         // Iniciar la simulación automática
@@ -1661,23 +1778,8 @@ if __name__ == '__main__':
                 startButton.textContent = 'Detener';
                 stepButton.disabled = true;
                 
-                // Ejecutar pasos automáticamente cada segundo
-                animationInterval = setInterval(() => {
-                    fetch('/get_state')
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.all_reached_goal) {
-                            updateStatus('¡Todos los robots han alcanzado sus metas!');
-                            stopSimulation();
-                        } else {
-                            step();
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error:', error);
-                        stopSimulation();
-                    });
-                }, 1000);
+                // Enviar evento para iniciar simulación automática
+                socket.emit('start_simulation');
             } else {
                 stopSimulation();
             }
@@ -1689,10 +1791,8 @@ if __name__ == '__main__':
             startButton.textContent = 'Iniciar';
             stepButton.disabled = false;
             
-            if (animationInterval) {
-                clearInterval(animationInterval);
-                animationInterval = null;
-            }
+            // Enviar evento para detener simulación
+            socket.emit('stop_simulation');
         }
         
         // Event listeners para los botones
@@ -1716,18 +1816,9 @@ if __name__ == '__main__':
             });
             document.getElementById('assign-packages-btn').addEventListener('click', assignPackages);
         });
-
-        // Actualizar la función step para verificar estado de paquetes después de cada paso
-        const originalStepFunction = step;
-        step = function() {
-            originalStepFunction();
-            
-            // Después de cada paso, actualizar el estado de los paquetes
-            fetchPackagesStatus();
-        };
     </script>
 </body>
 </html>""")
     
-    print("Servidor Flask iniciado en http://127.0.0.1:5000")
-    app.run(debug=True)
+    socketio.run(app, debug=True, port=8080, host='0.0.0.0', log_output=True, use_reloader=False)
+    
