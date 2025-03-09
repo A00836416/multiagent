@@ -143,13 +143,28 @@ class RobotAgent(Agent):
         
         # Resetear los indicadores relacionados con la meta
         self.reached_goal = False
-        self.returning_to_task = False
         
         # Calcular la nueva ruta desde la posición actual hasta la nueva meta
         self.path = self.astar(self.pos, new_goal)
         
-        # Retornar si se encontró una ruta
-        return len(self.path) > 0
+        # Si no se encontró una ruta, intentar métodos alternativos
+        if not self.path or len(self.path) < 2:
+            print(f"Robot {self.unique_id}: No se pudo encontrar ruta directa a {new_goal}. Intentando con penalización.")
+            # Intentar con penalización de robots
+            self.path = self.astar_with_robot_penalty(self.pos, new_goal)
+            
+            if not self.path or len(self.path) < 2:
+                print(f"Robot {self.unique_id}: Fallido. Intentando con desvío.")
+                # Intentar con desvío
+                self.path = self.find_path_with_detour(self.pos, new_goal)
+        
+        # Garantizar que al menos tengamos la posición actual en la ruta
+        if not self.path:
+            self.path = [self.pos]
+            return False
+            
+        # Retornar True si se encontró una ruta significativa (más de un punto)
+        return len(self.path) > 1
     
     def assign_package(self, package):
         """Asigna un paquete al robot"""
@@ -300,18 +315,24 @@ class RobotAgent(Agent):
         return None
     
     def step(self):
+        """Método paso del robot reescrito para solucionar problemas de movimiento"""
+        # Verificar si está en estado idle
         if hasattr(self, 'idle') and self.idle:
             return
 
+        # Verificar si ha recogido/entregado un paquete en esta posición
         if self.carrying_package and self.pos == self.package_destination:
             if self.check_package_status():
-                return  # Si se recogió/entregó un paquete, terminar el paso
+                # Si se recogió/entregó un paquete, resetear el flag returning_to_task y terminar el paso
+                self.returning_to_task = False
+                return
 
-        # Si ya llegó a la meta, no hacer nada
+        # Si ya llegó a la meta y no está cargando, no hacer nada
         if self.reached_goal and not self.charging:
+            self.returning_to_task = False
             return
-            
-        # Si está en una estación de carga
+                
+        # ===== MANEJO DE ESTACIÓN DE CARGA =====
         if self.charging:
             # Verificar si sigue en la estación
             station = self.is_at_charging_station()
@@ -320,70 +341,99 @@ class RobotAgent(Agent):
                 # Cargar batería
                 self.charge_battery(station.charging_rate)
                 
-                # Si la batería está completa, continuar con la tarea original
+                # Si la batería está completa, preparar para continuar
                 if self.battery_level >= self.max_battery * 0.95:  # 95% de carga
                     print(f"Robot {self.unique_id}: Batería cargada al {self.get_battery_percentage():.1f}%. Preparando para continuar.")
+                    
+                    # Importante: Primero establecer variables de estado antes de recalcular rutas
                     self.charging = False
                     self.nearest_charging_station = None
+                    self.returning_to_task = True
+                    self.idle = False  # Asegurar que no esté en idle
                     
-                    # Si aún no ha llegado a la meta, retomar el camino original
-                    if not self.reached_goal:
-                        print(f"Robot {self.unique_id}: Batería cargada. Retomando tarea hacia {self.goal}.")
-                        # Calcular nuevo camino desde la posición actual hasta la meta original
-                        self.path = self.astar(self.pos, self.goal)
-                        
-                        # Verificar que la ruta es válida
-                        if not self.path:
-                            print(f"Robot {self.unique_id}: No se pudo encontrar ruta hacia la meta. Intentando alternativas.")
-                            # Intentar encontrar ruta con penalización
-                            self.path = self.astar_with_robot_penalty(self.pos, self.goal)
-                            if not self.path:
-                                # Intentar con desvío
-                                self.path = self.find_path_with_detour(self.pos, self.goal)
-                                if not self.path:
-                                    print(f"Robot {self.unique_id}: ERROR: No se pudo encontrar ninguna ruta. Reiniciando estado.")
-                                    # Si aún no hay camino, usar posición actual como único punto en la ruta
-                                    self.path = [self.pos]
-                        else:
-                            print(f"Robot {self.unique_id}: Nueva ruta calculada con {len(self.path)} pasos.")
-                        
-                        self.returning_to_task = True
-                        self.idle = False  # Asegurarse de que no esté en idle
-                        
-                        # Si el robot tiene un paquete asignado pero no lo ha recogido, 
-                        # reconfigurar el destino a la ubicación de recogida
-                        if self.carrying_package and self.carrying_package.status == 'assigned':
-                            self.package_destination = self.carrying_package.pickup_location
-                            self.change_goal(self.package_destination)
+                    # Determinar el destino correcto basado en el estado del paquete
+                    destino = None
+                    if self.carrying_package:
+                        if self.carrying_package.status == 'assigned':
+                            destino = self.carrying_package.pickup_location
+                            self.package_destination = destino
                             print(f"Robot {self.unique_id}: Retomando ruta hacia punto de recogida del paquete {self.carrying_package.id}.")
-                        # Si tiene un paquete recogido, confirmar que va hacia el punto de entrega
-                        elif self.carrying_package and self.carrying_package.status == 'picked':
-                            self.package_destination = self.carrying_package.delivery_location
-                            self.change_goal(self.package_destination)
+                        elif self.carrying_package.status == 'picked':
+                            destino = self.carrying_package.delivery_location
+                            self.package_destination = destino
                             print(f"Robot {self.unique_id}: Retomando ruta hacia punto de entrega del paquete {self.carrying_package.id}.")
                     else:
-                        print(f"Robot {self.unique_id}: Ya ha alcanzado su meta. No se requiere más movimiento.")
-                        # Forzar idle si ya alcanzó su meta para que pueda recibir nuevas tareas
+                        destino = self.goal
+                        print(f"Robot {self.unique_id}: Retomando ruta hacia meta original {self.goal}.")
+                    
+                    # Forzar el cálculo de una nueva ruta viable
+                    if destino:
+                        # Método 1: Usar A* directamente
+                        nueva_ruta = self.astar(self.pos, destino)
+                        
+                        # Si no funciona, intentar con penalización
+                        if not nueva_ruta or len(nueva_ruta) <= 1:
+                            print(f"Robot {self.unique_id}: Intentando ruta con penalización")
+                            nueva_ruta = self.astar_with_robot_penalty(self.pos, destino)
+                        
+                        # Como último recurso, intentar con desvío
+                        if not nueva_ruta or len(nueva_ruta) <= 1:
+                            print(f"Robot {self.unique_id}: Intentando ruta con desvío")
+                            nueva_ruta = self.find_path_with_detour(self.pos, destino)
+                        
+                        if nueva_ruta and len(nueva_ruta) > 1:
+                            self.path = nueva_ruta
+                            print(f"Robot {self.unique_id}: RUTA ENCONTRADA con {len(nueva_ruta)} pasos. Primer paso: {nueva_ruta[1]}")
+                            
+                            # FORZAR MOVIMIENTO INMEDIATO para evitar atascos
+                            next_pos = self.path[1]  # El siguiente paso en la ruta
+                            
+                            # Verificar si el siguiente paso está libre
+                            blocking_robot = None
+                            for robot in self.model.robots:
+                                if robot.unique_id != self.unique_id and robot.pos == next_pos:
+                                    blocking_robot = robot
+                                    break
+                            
+                            if blocking_robot is None:
+                                # El camino está libre, mover inmediatamente
+                                print(f"Robot {self.unique_id}: MOVIMIENTO FORZADO después de cargar a {next_pos}")
+                                self.path.pop(0)  # Eliminar posición actual
+                                self.model.grid.move_agent(self, next_pos)
+                                self.steps_taken += 1
+                                self.drain_battery()  # Consumir batería por el movimiento
+                                self.last_position = next_pos  # Actualizar última posición
+                                self.position_unchanged_count = 0  # Resetear contador de posición sin cambios
+                                return  # Terminar el paso después del movimiento forzado
+                            else:
+                                print(f"Robot {self.unique_id}: Movimiento bloqueado por Robot {blocking_robot.unique_id}")
+                        else:
+                            print(f"Robot {self.unique_id}: ERROR CRÍTICO - No se pudo calcular ruta después de cargar")
+                            # Como medida extrema, hacer que el robot sea idle para que pueda recibir nuevas tareas
+                            self.path = [self.pos]
+                            self.idle = True
+                            
+                            # Si tiene un paquete asignado pero no recogido, liberarlo
+                            if self.carrying_package and self.carrying_package.status == 'assigned':
+                                print(f"Robot {self.unique_id}: Liberando paquete {self.carrying_package.id} por imposibilidad de movimiento")
+                                self.carrying_package.status = 'waiting'
+                                self.carrying_package.assigned_robot_id = None
+                                self.carrying_package = None
+                    else:
+                        print(f"Robot {self.unique_id}: No se pudo determinar un destino válido")
                         self.idle = True
-                        self.path = [self.pos]
+                    
+                    return  # Importante: terminar el paso después de preparar la ruta
             else:
-                # Si no está en una estación de carga pero estaba en modo carga, algo salió mal
+                # Si ya no está en estación pero estaba cargando, reiniciar estado
+                print(f"Robot {self.unique_id}: ERROR - Ya no está en estación de carga")
                 self.charging = False
                 self.nearest_charging_station = None
-                print(f"Robot {self.unique_id}: Error: No se encontró estación de carga en la posición actual.")
-                self.idle = False  # Asegurarse de que no esté en idle
-                
-                # Si tiene un paquete, retomar su ruta
-                if self.carrying_package:
-                    if self.carrying_package.status == 'assigned':
-                        self.change_goal(self.carrying_package.pickup_location)
-                    elif self.carrying_package.status == 'picked':
-                        self.change_goal(self.carrying_package.delivery_location)
-                else:
-                    # Si no tiene paquete, asegurarse de que tenga una ruta
-                    self.path = [self.pos]
-                    self.idle = True  # Marcar como idle para que se le pueda asignar un paquete
+                # Reiniciar path con posición actual
+                self.path = [self.pos]
+                return  # Terminar este paso para permitir recálculo en el siguiente
 
+        # ===== DETECCIÓN DE BLOQUEO =====
         # Actualizar contador de posición sin cambios
         if self.last_position == self.pos:
             self.position_unchanged_count += 1
@@ -391,24 +441,41 @@ class RobotAgent(Agent):
             self.position_unchanged_count = 0
             self.last_position = self.pos
         
-        # Si lleva demasiado tiempo sin moverse, aumentar prioridad y buscar rutas alternativas
+        # Si lleva demasiado tiempo sin moverse, intentar soluciones
         if self.position_unchanged_count > 5:
             self.priority += 1  # Aumentar prioridad cada vez que está bloqueado
-            print(f"Robot {self.unique_id}: Posiblemente bloqueado, aumentando prioridad a {self.priority}")
+            print(f"Robot {self.unique_id}: Posiblemente bloqueado por {self.position_unchanged_count} pasos, aumentando prioridad a {self.priority}")
             
-            # Buscar una ruta completamente nueva si está bloqueado demasiado tiempo
+            # En bloqueos severos, buscar alternativas más drásticas
             if self.position_unchanged_count > 10:
+                print(f"Robot {self.unique_id}: Bloqueo prolongado, buscando alternativas...")
                 self.find_alternative_route()
+                
+                # Para bloqueos muy prolongados, resetear estado
+                if self.position_unchanged_count > 20:
+                    print(f"Robot {self.unique_id}: BLOQUEO CRÍTICO, RESETEANDO ESTADO")
+                    self.returning_to_task = False
+                    # Liberar paquete si no lo ha recogido aún
+                    if self.carrying_package and self.carrying_package.status == 'assigned':
+                        self.carrying_package.status = 'waiting'
+                        self.carrying_package.assigned_robot_id = None
+                        self.carrying_package = None
+                    self.idle = True
+                    self.path = [self.pos]
+                    return
 
-        # Movimiento normal (si no está cargando)
-        elif len(self.path) > 1:
+        # ===== MOVIMIENTO NORMAL =====
+        if len(self.path) > 1:  # Verificar que hay al menos un paso más en la ruta
             # Verificar si hay suficiente batería para moverse
             if not self.drain_battery():
                 return  # Batería agotada, no moverse
                 
             next_pos = self.path[1]  # El siguiente paso en la ruta
             
-                # Verificar si el siguiente paso está ocupado por otro robot
+            # DEBUG: Imprimir información de movimiento
+            print(f"Robot {self.unique_id}: Intentando moverse de {self.pos} a {next_pos}")
+            
+            # Verificar si el siguiente paso está ocupado por otro robot
             blocking_robot = None
             for robot in self.model.robots:
                 if robot.unique_id != self.unique_id and robot.pos == next_pos:
@@ -420,8 +487,7 @@ class RobotAgent(Agent):
                 self.blocked_count = 0  # Resetear contador de bloqueo
                 self.waiting_time = 0   # Resetear tiempo de espera
                 
-                self.path.pop(0)
-                next_pos = self.path[0]
+                self.path.pop(0)  # Eliminar posición actual de la ruta
                 self.model.grid.move_agent(self, next_pos)
                 self.steps_taken += 1
                 
@@ -431,15 +497,24 @@ class RobotAgent(Agent):
                 if station and self.nearest_charging_station:
                     print(f"Robot {self.unique_id}: Llegó a estación de carga.")
                     self.charging = True
-                elif self.pos == self.goal and not self.charging and not self.returning_to_task:
+                elif self.pos == self.goal and not self.returning_to_task:
                     self.reached_goal = True
                     print(f"¡Robot {self.unique_id} ha alcanzado el objetivo! (Batería: {self.battery_level:.1f}%)")
+                elif self.pos == self.goal and self.returning_to_task:
+                    # Ha alcanzado el objetivo mientras retornaba de carga
+                    print(f"Robot {self.unique_id}: Ha llegado al objetivo tras retornar de carga")
+                    self.returning_to_task = False
+                    
+                    # Verificar si tiene un paquete y está en el lugar correcto
+                    if self.carrying_package and self.pos == self.package_destination:
+                        self.check_package_status()
                 else:
-                    status = "Cargando" if self.charging else "Retornando a tarea" if self.returning_to_task else "Normal"
+                    status = "Cargando" if self.charging else "Retornando" if self.returning_to_task else "Normal"
                     print(f"Robot {self.unique_id} se movió a {next_pos} (Paso {self.steps_taken}, Batería: {self.battery_level:.1f}%, Estado: {status})")
             else:
                 # Camino bloqueado por otro robot
                 self.blocked_count += 1
+                print(f"Robot {self.unique_id}: Bloqueado por Robot {blocking_robot.unique_id} (intento {self.blocked_count})")
                 
                 # Determinar qué robot tiene mayor prioridad
                 if self.priority > blocking_robot.priority or (self.priority == blocking_robot.priority and self.unique_id < blocking_robot.unique_id):
@@ -462,9 +537,18 @@ class RobotAgent(Agent):
                         self.find_alternative_route()
         elif len(self.path) == 1 and self.pos == self.path[0]:
             # Si llegó al final de la ruta
-            if self.pos == self.goal and not self.returning_to_task:
-                self.reached_goal = True
-                print(f"¡Robot {self.unique_id} ha alcanzado el objetivo! (Batería: {self.battery_level:.1f}%)")
+            if self.pos == self.goal:
+                if not self.returning_to_task:
+                    self.reached_goal = True
+                    print(f"¡Robot {self.unique_id} ha alcanzado el objetivo final! (Batería: {self.battery_level:.1f}%)")
+                else:
+                    # Ha llegado al objetivo mientras retornaba de una tarea
+                    self.returning_to_task = False
+                    print(f"Robot {self.unique_id} ha completado su retorno tras cargar.")
+                    
+                    # Verificar si tiene un paquete y está en el lugar correcto
+                    if self.carrying_package and self.pos == self.package_destination:
+                        self.check_package_status()
             
             # Verificar si está en una estación de carga
             station = self.is_at_charging_station()
@@ -472,6 +556,9 @@ class RobotAgent(Agent):
             if station and not self.charging and self.nearest_charging_station:
                 print(f"Robot {self.unique_id}: Llegó a estación de carga.")
                 self.charging = True
+        else:
+            # Si no tiene ruta o es inválida, imprimir advertencia
+            print(f"Robot {self.unique_id}: ADVERTENCIA - No tiene una ruta válida. Path actual: {self.path}")
     
     def find_alternative_route(self):
         """Busca una ruta alternativa cuando el robot está bloqueado"""
@@ -481,27 +568,69 @@ class RobotAgent(Agent):
         old_path = self.path.copy() if self.path else []
         
         # Determinar destino final (meta del robot o estación de carga)
-        destination = self.goal
+        destination = None
         if self.charging and self.nearest_charging_station:
             destination = self.nearest_charging_station.pos
+        elif self.carrying_package:
+            if self.carrying_package.status == 'assigned':
+                destination = self.carrying_package.pickup_location
+            elif self.carrying_package.status == 'picked':
+                destination = self.carrying_package.delivery_location
+        else:
+            destination = self.goal
+        
+        if not destination:
+            print(f"Robot {self.unique_id}: No se pudo determinar destino para ruta alternativa.")
+            return False
         
         # Estrategia 1: Ruta normal A* (ya intentada pero volvemos a intentar por si hay cambios)
         self.path = self.astar(self.pos, destination)
         
         # Si no encontró ruta o es la misma, probar con penalización de posiciones ocupadas
-        if not self.path or self.path == old_path or self.path_in_tried_alternatives(self.path):
+        if not self.path or len(self.path) < 2 or self.path == old_path or self.path_in_tried_alternatives(self.path):
             print(f"Robot {self.unique_id}: Buscando ruta con penalización de robots...")
             self.path = self.astar_with_robot_penalty(self.pos, destination)
         
         # Si aún no encuentra ruta, intentar una ruta más larga con desvío
-        if not self.path or self.path == old_path or self.path_in_tried_alternatives(self.path):
+        if not self.path or len(self.path) < 2 or self.path == old_path or self.path_in_tried_alternatives(self.path):
             print(f"Robot {self.unique_id}: Buscando ruta con desvío...")
             self.path = self.find_path_with_detour(self.pos, destination)
         
+        # Si aún no encuentra ruta, intentar un método más drástico con desvíos aleatorios
+        if not self.path or len(self.path) < 2 or self.path == old_path or self.path_in_tried_alternatives(self.path):
+            print(f"Robot {self.unique_id}: Intentando desvío aleatorio...")
+            import random
+            
+            # Generar un punto aleatorio alejado de la posición actual
+            valid_desvio = False
+            max_intentos = 10
+            intentos = 0
+            
+            while not valid_desvio and intentos < max_intentos:
+                # Generar un punto aleatorio en el grid
+                random_x = random.randint(0, self.model.grid.width - 1)
+                random_y = random.randint(0, self.model.grid.height - 1)
+                punto_desvio = (random_x, random_y)
+                
+                # Verificar que no sea un obstáculo
+                if not self.model.has_obstacle(punto_desvio):
+                    # Buscar ruta hasta este punto
+                    ruta_a_desvio = self.astar(self.pos, punto_desvio)
+                    if ruta_a_desvio and len(ruta_a_desvio) > 1:
+                        # Luego buscar ruta desde ahí hasta el destino final
+                        ruta_desde_desvio = self.astar(punto_desvio, destination)
+                        if ruta_desde_desvio and len(ruta_desde_desvio) > 1:
+                            # Combinar las rutas (eliminar duplicado del punto de desvío)
+                            self.path = ruta_a_desvio + ruta_desde_desvio[1:]
+                            valid_desvio = True
+                            print(f"Robot {self.unique_id}: Ruta con desvío aleatorio encontrada a través de {punto_desvio}")
+                
+                intentos += 1
+        
         # Si sigue sin encontrar ruta, esperar y mantener la ruta anterior
-        if not self.path:
+        if not self.path or len(self.path) < 2:
             print(f"Robot {self.unique_id}: No se encontró ruta alternativa, manteniendo la actual y esperando...")
-            self.path = old_path
+            self.path = old_path if old_path else [self.pos]
             return False
         
         # Guardar esta ruta en las alternativas probadas
