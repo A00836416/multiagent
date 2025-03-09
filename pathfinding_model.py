@@ -150,6 +150,7 @@ class RobotAgent(Agent):
         
         # Retornar si se encontró una ruta
         return len(self.path) > 0
+    
     def assign_package(self, package):
         """Asigna un paquete al robot"""
         self.carrying_package = package
@@ -321,22 +322,69 @@ class RobotAgent(Agent):
                 
                 # Si la batería está completa, continuar con la tarea original
                 if self.battery_level >= self.max_battery * 0.95:  # 95% de carga
+                    print(f"Robot {self.unique_id}: Batería cargada al {self.get_battery_percentage():.1f}%. Preparando para continuar.")
                     self.charging = False
                     self.nearest_charging_station = None
                     
                     # Si aún no ha llegado a la meta, retomar el camino original
-                    if not self.reached_goal and self.original_path:
-                        print(f"Robot {self.unique_id}: Batería cargada. Retomando tarea original.")
+                    if not self.reached_goal:
+                        print(f"Robot {self.unique_id}: Batería cargada. Retomando tarea hacia {self.goal}.")
                         # Calcular nuevo camino desde la posición actual hasta la meta original
                         self.path = self.astar(self.pos, self.goal)
+                        
+                        # Verificar que la ruta es válida
+                        if not self.path:
+                            print(f"Robot {self.unique_id}: No se pudo encontrar ruta hacia la meta. Intentando alternativas.")
+                            # Intentar encontrar ruta con penalización
+                            self.path = self.astar_with_robot_penalty(self.pos, self.goal)
+                            if not self.path:
+                                # Intentar con desvío
+                                self.path = self.find_path_with_detour(self.pos, self.goal)
+                                if not self.path:
+                                    print(f"Robot {self.unique_id}: ERROR: No se pudo encontrar ninguna ruta. Reiniciando estado.")
+                                    # Si aún no hay camino, usar posición actual como único punto en la ruta
+                                    self.path = [self.pos]
+                        else:
+                            print(f"Robot {self.unique_id}: Nueva ruta calculada con {len(self.path)} pasos.")
+                        
                         self.returning_to_task = True
+                        self.idle = False  # Asegurarse de que no esté en idle
+                        
+                        # Si el robot tiene un paquete asignado pero no lo ha recogido, 
+                        # reconfigurar el destino a la ubicación de recogida
+                        if self.carrying_package and self.carrying_package.status == 'assigned':
+                            self.package_destination = self.carrying_package.pickup_location
+                            self.change_goal(self.package_destination)
+                            print(f"Robot {self.unique_id}: Retomando ruta hacia punto de recogida del paquete {self.carrying_package.id}.")
+                        # Si tiene un paquete recogido, confirmar que va hacia el punto de entrega
+                        elif self.carrying_package and self.carrying_package.status == 'picked':
+                            self.package_destination = self.carrying_package.delivery_location
+                            self.change_goal(self.package_destination)
+                            print(f"Robot {self.unique_id}: Retomando ruta hacia punto de entrega del paquete {self.carrying_package.id}.")
+                    else:
+                        print(f"Robot {self.unique_id}: Ya ha alcanzado su meta. No se requiere más movimiento.")
+                        # Forzar idle si ya alcanzó su meta para que pueda recibir nuevas tareas
+                        self.idle = True
+                        self.path = [self.pos]
             else:
                 # Si no está en una estación de carga pero estaba en modo carga, algo salió mal
                 self.charging = False
+                self.nearest_charging_station = None
                 print(f"Robot {self.unique_id}: Error: No se encontró estación de carga en la posición actual.")
-            
+                self.idle = False  # Asegurarse de que no esté en idle
+                
+                # Si tiene un paquete, retomar su ruta
+                if self.carrying_package:
+                    if self.carrying_package.status == 'assigned':
+                        self.change_goal(self.carrying_package.pickup_location)
+                    elif self.carrying_package.status == 'picked':
+                        self.change_goal(self.carrying_package.delivery_location)
+                else:
+                    # Si no tiene paquete, asegurarse de que tenga una ruta
+                    self.path = [self.pos]
+                    self.idle = True  # Marcar como idle para que se le pueda asignar un paquete
 
-            # Actualizar contador de posición sin cambios
+        # Actualizar contador de posición sin cambios
         if self.last_position == self.pos:
             self.position_unchanged_count += 1
         else:

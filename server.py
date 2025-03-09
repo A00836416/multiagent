@@ -49,6 +49,23 @@ delivery_positions = [
     (36, 14), (36, 16), (36, 18)
 ]
 
+# Función para modificar el método deliver_package de RobotAgent
+def modify_robot_deliver_package():
+    """Modifica el método deliver_package de RobotAgent para añadir asignación automática"""
+    original_deliver_package = RobotAgent.deliver_package
+    
+    def new_deliver_package(self):
+        result = original_deliver_package(self)
+        if result:
+            # El paquete fue entregado con éxito, intentar asignar otro
+            # Usamos eventlet.spawn para ejecutar esto de forma asíncrona
+            eventlet.spawn(assign_packages_to_available_robots)
+        return result
+    
+    # Reemplazar el método original con el nuevo
+    RobotAgent.deliver_package = new_deliver_package
+    print("Se ha modificado el método deliver_package para asignación automática")
+
 # Implementar métodos para el modelo
 def get_truck_positions(model):
     return truck_positions
@@ -175,8 +192,12 @@ def handle_initialize(data):
             'max_battery': robot.max_battery,
             'charging': robot.charging,
             'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
-            'idle': getattr(robot, 'idle', False)
+            'idle': getattr(robot, 'idle', False),
+            'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked'
         })
+    
+    # Generar 2000 paquetes automáticamente después de la inicialización
+    generate_initial_packages(2000)
     
     # Emitir evento de inicialización exitosa
     emit('initialization_complete', {
@@ -185,6 +206,85 @@ def handle_initialize(data):
         'obstacles': obstacles,
         'charging_stations': charging_stations
     })
+
+def generate_initial_packages(count):
+    """Genera un número específico de paquetes automáticamente"""
+    if model is None:
+        return
+    
+    truck_positions = model.get_truck_positions()
+    delivery_positions = model.get_delivery_positions()
+    
+    print(f"Generando {count} paquetes...")
+    packages_created = []
+    for _ in range(count):
+        truck_pos = random.choice(truck_positions)
+        delivery_pos = random.choice(delivery_positions)
+        package = model.create_package(truck_pos, delivery_pos)
+        packages_created.append({
+            'id': package.id,
+            'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
+            'delivery': {'x': package.delivery_location[0], 'y': package.delivery_location[1]},
+            'status': package.status
+        })
+    
+    print(f"Se crearon {len(packages_created)} paquetes")
+    
+    socketio.emit('packages_created', {
+        'packages': packages_created[:10],  # Solo enviar los primeros 10 para no sobrecargar la UI
+        'total_created': count
+    })
+    
+    # Intentar asignar paquetes a todos los robots inicialmente
+    assign_packages_to_available_robots()
+
+def assign_packages_to_available_robots():
+    """Asigna paquetes a robots disponibles"""
+    if model is None:
+        return
+    
+    # Encontrar robots disponibles (sin paquetes asignados)
+    available_robots = [robot for robot in model.robots 
+                       if robot.carrying_package is None and 
+                       not robot.charging and 
+                       getattr(robot, 'idle', False)]
+    
+    if not available_robots:
+        return
+    
+    # Obtener paquetes disponibles
+    available_packages = model.get_available_packages()
+    
+    if not available_packages:
+        return
+    
+    print(f"Asignando paquetes: {len(available_packages)} disponibles, {len(available_robots)} robots libres")
+    
+    # Asignar paquetes a robots disponibles
+    assignments_made = 0
+    for i in range(min(len(available_robots), len(available_packages))):
+        robot = available_robots[i]
+        package = available_packages[i]
+        
+        if model.assign_package_to_robot(package.id, robot.unique_id):
+            assignments_made += 1
+            print(f"Paquete {package.id} asignado al robot {robot.unique_id}")
+            
+            # Emitir evento de asignación para este paquete específico
+            socketio.emit('package_assigned', {
+                'package_id': package.id,
+                'robot': {
+                    'id': robot.unique_id,
+                    'goal': {'x': robot.goal[0], 'y': robot.goal[1]},
+                    'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path]
+                }
+            })
+    
+    if assignments_made > 0:
+        print(f"Se asignaron {assignments_made} paquetes")
+        # Emitir actualizaciones generales
+        emit_robots_update()
+        emit_packages_update()
 
 @socketio.on('step')
 def handle_step():
@@ -197,9 +297,13 @@ def handle_step():
     
     # Ejecutar un paso
     model.step()
+
+    # Verificar si hay robots disponibles para asignar paquetes
+    assign_packages_to_available_robots()
     
     # Emitir el estado actualizado
     emit_robots_update()
+    emit_packages_update()
     
 @socketio.on('change_goal')
 def handle_change_goal(data):
@@ -315,7 +419,7 @@ def handle_add_charging_station(data):
         emit('error', {'message': 'No se puede añadir estación de carga en la posición especificada'})
 
 @socketio.on('add_robot')
-def handle_add_robot(data):
+def handle_robot_added(data):
     """Añade un nuevo robot a la simulación"""
     global model, robots_config
     
@@ -387,7 +491,8 @@ def handle_add_robot(data):
             'max_battery': max_battery,
             'charging': False,
             'battery_percentage': (battery_level / max_battery) * 100,
-            'idle': idle
+            'idle': idle,
+            'is_carrying': False  # Un robot nuevo nunca está llevando un paquete
         }
     })
 
@@ -491,6 +596,84 @@ def handle_get_state():
     """Devuelve el estado actual del modelo"""
     emit_state()
 
+@app.route('/get_state', methods=['GET'])
+def get_state():
+    """Devuelve el estado actual del modelo en formato JSON"""
+    global model, obstacles, charging_stations
+
+    if model is None:
+        return {"error": "Modelo no inicializado"}, 400
+
+    # Obtener información de todos los robots
+    robots_info = []
+    for robot in model.robots:
+        robot_data = {
+            'id': robot.unique_id,
+            'start': {'x': robot.start[0], 'y': robot.start[1]},
+            'goal': {'x': robot.goal[0], 'y': robot.goal[1]},
+            'position': {'x': robot.pos[0], 'y': robot.pos[1]},
+            'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path],
+            'reached_goal': robot.reached_goal,
+            'steps_taken': robot.steps_taken,
+            'color': robot.color,
+            'battery_level': robot.battery_level,
+            'max_battery': robot.max_battery,
+            'charging': robot.charging,
+            'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
+            'total_packages_delivered': robot.total_packages_delivered,
+            'idle': getattr(robot, 'idle', False),  # Obtener atributo idle, default False si no existe
+            'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked'
+        }
+
+        # Añadir información del paquete si el robot lo lleva
+        if robot.carrying_package:
+            robot_data['carrying_package'] = {
+                'id': robot.carrying_package.id,
+                'status': robot.carrying_package.status,
+                'pickup': {'x': robot.carrying_package.pickup_location[0], 'y': robot.carrying_package.pickup_location[1]},
+                'delivery': {'x': robot.carrying_package.delivery_location[0], 'y': robot.carrying_package.delivery_location[1]}
+            }
+
+        robots_info.append(robot_data)
+
+    # Obtener información de paquetes activos y entregados
+    active_packages = []
+    delivered_packages = []
+    
+    for package in model.packages:
+        if package.status != 'delivered':
+            active_packages.append({
+                'id': package.id,
+                'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
+                'delivery': {'x': package.delivery_location[0], 'y': package.delivery_location[1]},
+                'status': package.status,
+                'assigned_robot_id': package.assigned_robot_id
+            })
+    
+    for package in model.delivered_packages:
+        delivered_packages.append({
+            'id': package.id,
+            'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
+            'delivery': {'x': package.delivery_location[0], 'y': package.delivery_location[1]},
+            'status': package.status,
+            'assigned_robot_id': package.assigned_robot_id,
+            'pickup_time': package.pickup_time,
+            'delivery_time': package.delivery_time
+        })
+
+    # Retornar el estado en formato JSON
+    return json.dumps({
+        'grid_size': {'width': model.grid.width, 'height': model.grid.height},
+        'robots': robots_info,
+        'obstacles': obstacles,
+        'charging_stations': charging_stations,
+        'all_reached_goal': model.all_robots_reached_goal(),
+        'total_packages_delivered': len(model.delivered_packages),
+        'active_packages': active_packages,
+        'delivered_packages': delivered_packages
+    }, indent=4), 200
+
+
 # Funciones de emisión de eventos
 def emit_state():
     """Emite el estado completo del modelo"""
@@ -516,7 +699,8 @@ def emit_state():
             'charging': robot.charging,
             'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
             'total_packages_delivered': robot.total_packages_delivered,
-            'idle': getattr(robot, 'idle', False)  # Obtener atributo idle, default False si no existe
+            'idle': getattr(robot, 'idle', False),
+            'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked'
         }
         
         # Añadir información del paquete si lo lleva
@@ -569,7 +753,8 @@ def emit_robots_update():
             'status': 'charging' if robot.charging else 'goal_reached' if robot.reached_goal else 'moving',
             'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
             'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path],  # Incluir la ruta actualizada
-            'idle': getattr(robot, 'idle', False)  # Atributo idle
+            'idle': getattr(robot, 'idle', False),  # Atributo idle
+            'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked'
         })
     
     socketio.emit('robots_update', {
@@ -625,6 +810,9 @@ def run_simulation_step():
     # Ejecutar un paso
     model.step()
     
+    # Asignar paquetes a robots disponibles
+    assign_packages_to_available_robots()
+    
     # Emitir actualizaciones
     emit_robots_update()
     emit_packages_update()
@@ -660,11 +848,14 @@ def handle_stop_simulation():
     # cuando los robots alcancen su meta
     emit('simulation_stopped', {'reason': 'user_request'})
 
-# Código para generar la plantilla HTML cuando se ejecuta el servidor
+# Código para generar la plantilla HTML y ejecutar el servidor
 if __name__ == '__main__':
     # Crear el directorio templates si no existe
     if not os.path.exists('templates'):
         os.makedirs('templates')
+
+    # Aplicar el parche para la asignación automática de paquetes
+    modify_robot_deliver_package()
     
     # Generar la interfaz HTML con funciones WebSocket
     with open('templates/index.html', 'w') as f:
@@ -1052,13 +1243,20 @@ if __name__ == '__main__':
         </div>
 
         <div>
-            <h2>Sistema de Paquetes</h2>
-            <div class="buttons">
-                <button id="generate-packages-btn">Generar 5 Paquetes</button>
-                <button id="assign-packages-btn">Asignar Paquetes</button>
+            <h2>Sistema de Paquetes Automático</h2>
+            <p>El sistema genera 2000 paquetes al inicio y asigna automáticamente nuevos paquetes a cada robot cuando termina de entregar uno.</p>
+            <div class="stats-container">
+                <div class="stat-item">
+                    <div>Paquetes Disponibles</div>
+                    <div class="stat-value" id="available-packages">0</div>
+                </div>
+                <div class="stat-item">
+                    <div>Paquetes Asignados</div>
+                    <div class="stat-value" id="assigned-packages">0</div>
+                </div>
             </div>
             <div id="packages-container" class="packages-container">
-                <p>No hay paquetes pendientes.</p>
+                <p>Cargando paquetes...</p>
             </div>
         </div>
         
@@ -1202,6 +1400,7 @@ if __name__ == '__main__':
                     robot.charging = robotUpdate.charging;
                     robot.path = robotUpdate.path;
                     robot.idle = robotUpdate.idle;
+                    robot.is_carrying = robotUpdate.is_carrying;
                 }
             });
             
@@ -1618,8 +1817,10 @@ if __name__ == '__main__':
                         robotElement.setAttribute('title', 'Robot en espera');
                     }
                     
-                    if (robot.carrying_package) {
+                    // Usar la propiedad is_carrying para determinar si el robot está llevando un paquete
+                    if (robot.is_carrying) {
                         robotElement.classList.add('robot-carrying');
+                        robotElement.setAttribute('title', 'Robot llevando paquete');
                     }
                     
                     // Tamaño basado en el tamaño de la celda
@@ -1668,7 +1869,7 @@ if __name__ == '__main__':
                     robotsContainer.appendChild(robotElement);
                     
                     // Debug: Añadir un log para verificar que se está creando el robot
-                    console.log(`Robot ${robot.id} creado en posición (${robot.position.x}, ${robot.position.y}), idle: ${robot.idle}`);
+                    console.log(`Robot ${robot.id} creado en posición (${robot.position.x}, ${robot.position.y}), idle: ${robot.idle}, carrying: ${robot.is_carrying}`);
                 } else {
                     console.error(`No se encontró celda para el robot ${robot.id} en posición (${robot.position.x}, ${robot.position.y})`);
                 }
@@ -1722,6 +1923,8 @@ if __name__ == '__main__':
 
         function updatePackagesUI() {
             const packagesContainer = document.getElementById('packages-container');
+            const availablePackagesCounter = document.getElementById('available-packages');
+            const assignedPackagesCounter = document.getElementById('assigned-packages');
             
             if (activePackages.length === 0) {
                 packagesContainer.innerHTML = '<p>No hay paquetes pendientes.</p>';
@@ -1729,7 +1932,20 @@ if __name__ == '__main__':
             }
             
             let html = '';
+            let waitingCount = 0;
+            let assignedCount = 0;
+            let pickedCount = 0;
+            
             for (const pkg of activePackages) {
+                if (pkg.status === 'waiting') waitingCount++;
+                else if (pkg.status === 'assigned') assignedCount++;
+                else if (pkg.status === 'picked') pickedCount++;
+            }
+            
+            // Mostrar solo una muestra de los paquetes (máximo 10)
+            const packagesToShow = activePackages.slice(0, 10);
+            
+            for (const pkg of packagesToShow) {
                 const statusClass = pkg.status;
                 html += `
                     <div class="package ${statusClass}">
@@ -1742,9 +1958,17 @@ if __name__ == '__main__':
                 `;
             }
             
+            if (activePackages.length > 10) {
+                html += `<p>... y ${activePackages.length - 10} paquetes más no mostrados.</p>`;
+            }
+            
             packagesContainer.innerHTML = html;
             
             // Actualizar contadores
+            if (availablePackagesCounter) availablePackagesCounter.textContent = waitingCount;
+            if (assignedPackagesCounter) assignedPackagesCounter.textContent = assignedCount + pickedCount;
+            
+            // Actualizar contadores generales
             document.getElementById('total-delivered').textContent = deliveredPackages.length;
             document.getElementById('active-packages').textContent = activePackages.length;
         }
@@ -1795,6 +2019,13 @@ if __name__ == '__main__':
             socket.emit('stop_simulation');
         }
         
+        // Escuchar evento de paquetes iniciales creados
+        socket.on('initial_packages_created', (data) => {
+            console.log(`Se han creado ${data.total_created} paquetes iniciales`);
+            // Actualizar la UI
+            fetchPackagesStatus();
+        });
+        
         // Event listeners para los botones
         initButton.addEventListener('click', initializeGrid);
         startButton.addEventListener('click', startSimulation);
@@ -1810,15 +2041,9 @@ if __name__ == '__main__':
         window.addEventListener('load', () => {
             // Añadir un robot por defecto
             addRobot();
-            // Añadir event listeners para los botones de paquetes
-            document.getElementById('generate-packages-btn').addEventListener('click', () => {
-                createPackages(5);
-            });
-            document.getElementById('assign-packages-btn').addEventListener('click', assignPackages);
         });
     </script>
 </body>
 </html>""")
     
     socketio.run(app, debug=True, port=8080, host='0.0.0.0', log_output=True, use_reloader=False)
-    

@@ -382,13 +382,20 @@
         </div>
 
         <div>
-            <h2>Sistema de Paquetes</h2>
-            <div class="buttons">
-                <button id="generate-packages-btn">Generar 5 Paquetes</button>
-                <button id="assign-packages-btn">Asignar Paquetes</button>
+            <h2>Sistema de Paquetes Automático</h2>
+            <p>El sistema genera 2000 paquetes al inicio y asigna automáticamente nuevos paquetes a cada robot cuando termina de entregar uno.</p>
+            <div class="stats-container">
+                <div class="stat-item">
+                    <div>Paquetes Disponibles</div>
+                    <div class="stat-value" id="available-packages">0</div>
+                </div>
+                <div class="stat-item">
+                    <div>Paquetes Asignados</div>
+                    <div class="stat-value" id="assigned-packages">0</div>
+                </div>
             </div>
             <div id="packages-container" class="packages-container">
-                <p>No hay paquetes pendientes.</p>
+                <p>Cargando paquetes...</p>
             </div>
         </div>
         
@@ -532,6 +539,7 @@
                     robot.charging = robotUpdate.charging;
                     robot.path = robotUpdate.path;
                     robot.idle = robotUpdate.idle;
+                    robot.is_carrying = robotUpdate.is_carrying;
                 }
             });
             
@@ -948,8 +956,10 @@
                         robotElement.setAttribute('title', 'Robot en espera');
                     }
                     
-                    if (robot.carrying_package) {
+                    // Usar la propiedad is_carrying para determinar si el robot está llevando un paquete
+                    if (robot.is_carrying) {
                         robotElement.classList.add('robot-carrying');
+                        robotElement.setAttribute('title', 'Robot llevando paquete');
                     }
                     
                     // Tamaño basado en el tamaño de la celda
@@ -998,7 +1008,7 @@
                     robotsContainer.appendChild(robotElement);
                     
                     // Debug: Añadir un log para verificar que se está creando el robot
-                    console.log(`Robot ${robot.id} creado en posición (${robot.position.x}, ${robot.position.y}), idle: ${robot.idle}`);
+                    console.log(`Robot ${robot.id} creado en posición (${robot.position.x}, ${robot.position.y}), idle: ${robot.idle}, carrying: ${robot.is_carrying}`);
                 } else {
                     console.error(`No se encontró celda para el robot ${robot.id} en posición (${robot.position.x}, ${robot.position.y})`);
                 }
@@ -1052,6 +1062,8 @@
 
         function updatePackagesUI() {
             const packagesContainer = document.getElementById('packages-container');
+            const availablePackagesCounter = document.getElementById('available-packages');
+            const assignedPackagesCounter = document.getElementById('assigned-packages');
             
             if (activePackages.length === 0) {
                 packagesContainer.innerHTML = '<p>No hay paquetes pendientes.</p>';
@@ -1059,7 +1071,20 @@
             }
             
             let html = '';
+            let waitingCount = 0;
+            let assignedCount = 0;
+            let pickedCount = 0;
+            
             for (const pkg of activePackages) {
+                if (pkg.status === 'waiting') waitingCount++;
+                else if (pkg.status === 'assigned') assignedCount++;
+                else if (pkg.status === 'picked') pickedCount++;
+            }
+            
+            // Mostrar solo una muestra de los paquetes (máximo 10)
+            const packagesToShow = activePackages.slice(0, 10);
+            
+            for (const pkg of packagesToShow) {
                 const statusClass = pkg.status;
                 html += `
                     <div class="package ${statusClass}">
@@ -1072,9 +1097,17 @@
                 `;
             }
             
+            if (activePackages.length > 10) {
+                html += `<p>... y ${activePackages.length - 10} paquetes más no mostrados.</p>`;
+            }
+            
             packagesContainer.innerHTML = html;
             
             // Actualizar contadores
+            if (availablePackagesCounter) availablePackagesCounter.textContent = waitingCount;
+            if (assignedPackagesCounter) assignedPackagesCounter.textContent = assignedCount + pickedCount;
+            
+            // Actualizar contadores generales
             document.getElementById('total-delivered').textContent = deliveredPackages.length;
             document.getElementById('active-packages').textContent = activePackages.length;
         }
@@ -1125,6 +1158,13 @@
             socket.emit('stop_simulation');
         }
         
+        // Escuchar evento de paquetes iniciales creados
+        socket.on('initial_packages_created', (data) => {
+            console.log(`Se han creado ${data.total_created} paquetes iniciales`);
+            // Actualizar la UI
+            fetchPackagesStatus();
+        });
+        
         // Event listeners para los botones
         initButton.addEventListener('click', initializeGrid);
         startButton.addEventListener('click', startSimulation);
@@ -1140,11 +1180,6 @@
         window.addEventListener('load', () => {
             // Añadir un robot por defecto
             addRobot();
-            // Añadir event listeners para los botones de paquetes
-            document.getElementById('generate-packages-btn').addEventListener('click', () => {
-                createPackages(5);
-            });
-            document.getElementById('assign-packages-btn').addEventListener('click', assignPackages);
         });
     </script>
 </body>
