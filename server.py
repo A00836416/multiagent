@@ -145,7 +145,65 @@ def handle_initialize(data):
     
     width = int(data.get('width', 10))
     height = int(data.get('height', 10))
-    robots_config = data.get('robots', [])
+    robots_config = [
+        # Robots cerca de las estaciones de carga (parte superior derecha)
+        {
+            'start': [33, 2],  # Cerca de la estación en (34, 1)
+            'goal': [33, 2],   # Mismo punto para que comience en idle
+            'color': "blue", 
+            'max_battery': 100,
+            'battery_drain_rate': 0.5,
+            'battery_level': 100,
+            'idle': True       # El robot comienza en modo idle
+        },
+        {
+            'start': [37, 4],  # Cerca de la estación en (38, 3)
+            'goal': [37, 4],   # Mismo punto para que comience en idle
+            'color': "green",
+            'max_battery': 100,
+            'battery_drain_rate': 0.5,
+            'battery_level': 100,
+            'idle': True
+        },
+        # Robots cerca de los camiones (parte inferior)
+        {
+            'start': [10, 20], # Cerca del camión en (11, 21)
+            'goal': [10, 20],  # Mismo punto para que comience en idle
+            'color': "red",
+            'max_battery': 100,
+            'battery_drain_rate': 0.5,
+            'battery_level': 100,
+            'idle': True
+        },
+        {
+            'start': [26, 20], # Cerca del camión en (27, 21)
+            'goal': [26, 20],  # Mismo punto para que comience en idle
+            'color': "purple",
+            'max_battery': 100,
+            'battery_drain_rate': 0.5,
+            'battery_level': 100,
+            'idle': True
+        },
+        # Robots en otras posiciones de la parte superior derecha
+        {
+            'start': [39, 1],  # Esquina superior derecha
+            'goal': [39, 1],   # Mismo punto para que comience en idle
+            'color': "orange",
+            'max_battery': 100,
+            'battery_drain_rate': 0.5,
+            'battery_level': 100,
+            'idle': True
+        },
+        {
+            'start': [38, 10], # Un poco más abajo en la parte derecha
+            'goal': [38, 10],  # Mismo punto para que comience en idle
+            'color': "cyan",
+            'max_battery': 100,
+            'battery_drain_rate': 0.5,
+            'battery_level': 100,
+            'idle': True
+        }
+    ]
     charging_stations_config = data.get('charging_stations', [])
     obstacles_list = data.get('obstacles', [])  
     
@@ -614,6 +672,7 @@ def get_state():
             'position': {'x': robot.pos[0], 'y': robot.pos[1]},
             'path': [{'x': pos[0], 'y': pos[1]} for pos in robot.path],
             'reached_goal': robot.reached_goal,
+            'steps_left': len(robot.path) - 1 if robot.path else 0,
             'steps_taken': robot.steps_taken,
             'color': robot.color,
             'battery_level': robot.battery_level,
