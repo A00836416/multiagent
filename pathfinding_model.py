@@ -95,7 +95,7 @@ class RobotAgent(Agent):
         self.battery_level = battery_level if battery_level is not None else max_battery
         self.battery_drain_rate = battery_drain_rate
         self.charging = False
-        self.low_battery_threshold = 30  # % de batería para buscar estación de carga
+        self.low_battery_threshold = 35  # % de batería para buscar estación de carga
         self.nearest_charging_station = None
         self.original_path = self.path.copy() if self.path else []
         self.blocked_count = 0  # Contador para cuando el robot está bloqueado
@@ -121,12 +121,61 @@ class RobotAgent(Agent):
         self.charging_station_target = None  # Guarda la referencia a la estación objetivo
         self.critical_battery = False  # Indica si la batería está en nivel crítico
         self.emergency_route = False   # Indica si está en ruta de emergencia a una estación
+        self.critical_battery_threshold = 20  # Medidas especiales al 20%
+        self.emergency_battery_threshold = 10  # Acciones drásticas al 10%
         
         if not self.path:
             print(f"Robot {unique_id}: No se encontró camino del inicio al objetivo.")
         else:
             print(f"Robot {unique_id}: Ruta calculada: {self.path}")
             print(f"Robot {unique_id}: Nivel de batería: {self.battery_level}%")
+    
+    
+    def calculate_emergency_path(self, start, goal):
+        """Calcula una ruta de emergencia directa hacia la estación de carga.
+        Usa A* simple sin preocuparse tanto por penalizaciones de robots."""
+        
+        def heuristic(a, b):
+            # Distancia Manhattan
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+        
+        open_set = [start]
+        came_from = {}
+        g_score = {start: 0}
+        f_score = {start: heuristic(start, goal)}
+        
+        while open_set:
+            current = min(open_set, key=lambda x: f_score.get(x, float('inf')))
+            if current == goal:
+                # Reconstruir el camino
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.insert(0, current)
+                print(f"Robot {self.unique_id}: Ruta de emergencia encontrada, longitud: {len(path)}")
+                return path
+            
+            open_set.remove(current)
+            
+            # Explorar los 4 movimientos cardinales básicos
+            for d in [(-1, 0), (1, 0), (0, 1), (0, -1)]:
+                neighbor = (current[0] + d[0], current[1] + d[1])
+                
+                # Verificar límites del grid
+                if 0 <= neighbor[0] < self.model.grid.width and 0 <= neighbor[1] < self.model.grid.height:
+                    # Solo evitar obstáculos, ignorar otros robots
+                    if not self.model.has_obstacle(neighbor):
+                        tentative_g_score = g_score[current] + 1
+                        if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                            came_from[neighbor] = current
+                            g_score[neighbor] = tentative_g_score
+                            f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal)
+                            if neighbor not in open_set:
+                                open_set.append(neighbor)
+        
+        # Si no se encuentra ruta, intentar con el método normal
+        print(f"Robot {self.unique_id}: No se pudo encontrar ruta de emergencia, usando método normal")
+        return self.calculate_path_to_station(self.find_nearest_charging_station())
     
     def astar(self, start, goal):
         def heuristic(a, b):
@@ -177,39 +226,108 @@ class RobotAgent(Agent):
             current = came_from[current]
             path.insert(0, current)
         return path
+    
+    def check_robots_health(self):
+        """Verifica periódicamente el estado de todos los robots"""
+        for robot in self.robots:
+            # Detectar robots con batería crítica no dirigiéndose a cargar
+            if robot.battery_level < robot.max_battery * 0.15 and not robot.charging and not robot.nearest_charging_station:
+                print(f"Robot {robot.unique_id}: ALERTA DE SISTEMA - Batería crítica.")
+                # Forzar búsqueda de estación
+                nearest_station = robot.find_emergency_charging_station()
+                if nearest_station:
+                    robot.nearest_charging_station = nearest_station
+                    robot.charging_station_target = nearest_station
+                    robot.path = robot.calculate_emergency_path(robot.pos, nearest_station.pos)
+            
+            # Detectar robots atascados
+            if hasattr(robot, 'position_unchanged_count') and robot.position_unchanged_count > 10:
+                print(f"Robot {robot.unique_id}: ATENCIÓN - Robot atascado por {robot.position_unchanged_count} pasos.")
+                # Forzar reseteo de estado
+                robot.find_alternative_route()
+                robot.priority += 5  # Aumentar prioridad dramáticamente
 
     def handle_charging_station_arrival(self):
-        """Maneja la lógica cuando el robot llega a una estación de carga"""
-        station = self.is_at_charging_station()
+        """Maneja la llegada a una estación de carga y la carga de batería"""
+        # Buscar si estamos en una estación de carga
+        station = next((s for s in self.model.charging_stations if s.pos == self.pos), None)
         
         if not station:
-            return False
-            
-        # Si la estación está ocupada por otro robot
-        if station.current_robot is not None and station.current_robot != self.unique_id:
-            if not self.waiting_for_charge:
-                # Añadirse a la cola y empezar a esperar
-                station.add_to_queue(self.unique_id)
-                self.waiting_for_charge = True
-                self.charging_station_target = station
-                print(f"Robot {self.unique_id}: Estación ocupada. Esperando en la cola.")
-            return True
-        
-        # Si somos los siguientes en la cola o la estación está libre
-        if station.current_robot is None or station.is_next_in_queue(self.unique_id):
-            # Comenzar a cargar
-            station.start_charging(self.unique_id)
-            self.charging = True
+            # Si no estamos en una estación, limpiar los estados relacionados con la carga
             self.waiting_for_charge = False
-            print(f"Robot {self.unique_id}: Comenzando a cargar en estación {station.pos}")
-            return True
+            self.charging = False
+            self.current_charging_station = None
+            return False
         
-        # Si ya estamos en la cola, seguir esperando
-        if self.unique_id in station.waiting_queue:
-            print(f"Robot {self.unique_id}: Esperando en cola. Posición: {station.waiting_queue.index(self.unique_id) + 1}")
+        # Si ya estamos cargando, continuar con ese proceso
+        if self.charging:
+            if self.battery_level >= self.max_battery:
+                # Terminar la carga si la batería está llena
+                self.charging = False
+                if self.current_charging_station:
+                    self.current_charging_station.finish_charging(self.unique_id)
+                    self.current_charging_station = None
+                print(f"Robot {self.unique_id}: Carga completada, batería al 100%")
+                return True
+            else:
+                # Continuar cargando
+                self.charge_battery(station.charging_rate)
+                return True
+        
+        # Verificar si podemos comenzar a cargar
+        if station.is_next_in_queue(self.unique_id):
+            success = station.start_charging(self.unique_id)
+            if success:
+                self.charging = True
+                self.waiting_for_charge = False
+                self.current_charging_station = station
+                print(f"Robot {self.unique_id}: Comenzando a cargar en {station.pos}")
+                return True
+        
+        # Si estamos esperando en la cola
+        if self.waiting_for_charge:
+            # En lugar de intentar acceder directamente a station.queue, 
+            # usamos un método existente para verificar si seguimos en la cola
+            if station.is_next_in_queue(self.unique_id) or self.is_in_station_queue(station):
+                print(f"Robot {self.unique_id}: Esperando en cola de estación {station.pos}")
+                
+                # Si tenemos batería crítica, aumentar prioridad periódicamente
+                if self.battery_level < self.max_battery * 0.1:
+                    self.priority += 1
+                    print(f"Robot {self.unique_id}: Batería crítica en espera. Aumentando prioridad a {self.priority}")
+                return True
+            else:
+                # Ya no estamos en la cola, restablecer el estado de espera
+                self.waiting_for_charge = False
+        
+        # Si no estamos en la cola ni cargando, pero estamos en la estación, intentar añadirnos
+        if not self.waiting_for_charge and not self.charging:
+            station.add_to_queue(self.unique_id)
+            self.waiting_for_charge = True
+            self.current_charging_station = station  # Guardar referencia a la estación actual
+            print(f"Robot {self.unique_id}: Añadido a cola de estación mientras está en posición {station.pos}")
             return True
             
         return False
+
+    def is_in_station_queue(self, station):
+        """Comprueba si el robot está en la cola de la estación sin acceder directamente a la cola"""
+        # Implementamos un método auxiliar que verifica si el robot está en la cola
+        # sin acceder directamente al atributo queue
+        try:
+            # Intentar añadirnos a la cola y ver si falla
+            # Si ya estamos en la cola, debería fallar o retornar False
+            result = station.add_to_queue(self.unique_id)
+            if result is False:  # Si el método retorna False explícitamente
+                return True      # Estamos ya en la cola
+            else:
+                # Si tuvo éxito añadiéndonos, nos quitamos inmediatamente
+                station.remove_from_queue(self.unique_id)
+                return False
+        except Exception:
+            # Si hubo un error (como intentar añadir un robot que ya está),
+            # asumimos que estamos en la cola
+            return True
 
     def prioritize_charging_stations(self):
         """Busca y prioriza estaciones de carga basado en la ocupación y distancia"""
@@ -582,6 +700,13 @@ class RobotAgent(Agent):
         if not self.path or len(self.path) <= 1:
             return True
         
+        nearest_station = self.find_nearest_charging_station()
+        if nearest_station:
+            distance_to_station = abs(self.pos[0] - nearest_station.pos[0]) + abs(self.pos[1] - nearest_station.pos[1])
+            if distance_to_station <= 3:  # Si está a 3 pasos o menos de una estación
+                print(f"Robot {self.unique_id}: Estación cercana a {distance_to_station} pasos. Permitiendo movimiento.")
+                return True
+        
         # Si acaba de salir de carga y tiene más del 90% de batería, permitir continuar
         if hasattr(self, 'just_charged') and self.just_charged:
             if self.battery_level >= self.max_battery * 0.9:
@@ -628,11 +753,75 @@ class RobotAgent(Agent):
         
         return self.battery_level >= total_needed
     
+    def check_state_consistency(self):
+        """Verifica y corrige inconsistencias en el estado del robot"""
+        # Verificar que self.path no sea None
+        if self.path is None:
+            print(f"Robot {self.unique_id}: Path es None. Inicializando con posición actual.")
+            self.path = [self.pos]
+            
+        # Si self.path está vacío, inicializarlo con la posición actual
+        if len(self.path) == 0:
+            print(f"Robot {self.unique_id}: Path está vacío. Inicializando con posición actual.")
+            self.path = [self.pos]
+            
+        # Verificar que el primer elemento de path coincida con la posición actual
+        if self.path and self.path[0] != self.pos:
+            print(f"Robot {self.unique_id}: Posición actual {self.pos} no coincide con path[0] {self.path[0]}. Corrigiendo.")
+            self.path = [self.pos] + self.path
+        
+        # Verificar estados inconsistentes
+        if self.charging and self.idle:
+            print(f"Robot {self.unique_id}: No puede estar cargando e idle al mismo tiempo. Corrigiendo.")
+            self.idle = False
+            
+        # Verificar inconsistencias en estados de batería crítica
+        if self.critical_battery and self.battery_level > self.max_battery * 0.15:
+            print(f"Robot {self.unique_id}: Ya no tiene batería crítica. Reseteando flags.")
+            self.critical_battery = False
+            self.emergency_route = False
+    
+    def find_emergency_charging_station(self):
+        """Encuentra la estación más cercana en situación de emergencia"""
+        if not self.model.charging_stations:
+            return None
+        
+        # Encontrar todas las estaciones ordenadas SOLO por distancia
+        stations_by_distance = []
+        for station in self.model.charging_stations:
+            distance = abs(self.pos[0] - station.pos[0]) + abs(self.pos[1] - station.pos[1])
+            # Ignorar ocupación y solo considerar distancia
+            stations_by_distance.append((station, distance))
+        
+        # Ordenar por distancia
+        stations_by_distance.sort(key=lambda x: x[1])
+        
+        if stations_by_distance:
+            return stations_by_distance[0][0]  # Retornar la más cercana
+        
+        return None
+    
     def step(self):
         """Método paso del robot reescrito para solucionar problemas de movimiento y carga"""
+
+        battery_percentage = self.get_battery_percentage()
+    
+        # ACCIÓN DE EMERGENCIA para batería crítica
+        if battery_percentage <= 10 and not self.charging:
+            print(f"Robot {self.unique_id}: ¡BATERÍA CRÍTICA! ({battery_percentage:.1f}%)")
+            # Buscar CUALQUIER estación, sin importar colas o distancia
+            nearest_station = self.find_emergency_charging_station()
+            if nearest_station:
+                self.priority = 20  # Máxima prioridad
+                # Ruta usando el método de cálculo existente
+                self.path = self.calculate_path_to_station(nearest_station)
+                print(f"Robot {self.unique_id}: ¡RUTA DE EMERGENCIA ACTIVADA!")
+
         # Verificar si está en estado idle
         if hasattr(self, 'idle') and self.idle:
             return
+        
+        self.check_state_consistency()
 
         # Verificar si está esperando para cargar en una estación
         if self.waiting_for_charge and self.charging_station_target:
@@ -806,6 +995,14 @@ class RobotAgent(Agent):
                                 return  # Terminar el paso después del movimiento forzado
                             else:
                                 print(f"Robot {self.unique_id}: Movimiento bloqueado por Robot {blocking_robot.unique_id}")
+                                print(f"Robot {self.unique_id}: Movimiento bloqueado después de cargar. Buscando ruta alternativa.")
+                                # Incrementar la prioridad para próximos intentos
+                                self.priority += 2
+                                # Buscar una ruta alternativa inmediatamente
+                                self.find_alternative_route()
+                                # Si aún así no se puede mover, esperar algunos pasos y resetear estado
+                                if not self.path or len(self.path) <= 1:
+                                    self.waiting_time = 3  # Preparar para intentar alternativas pronto
                         else:
                             print(f"Robot {self.unique_id}: ERROR CRÍTICO - No se pudo calcular ruta después de cargar")
                             # Como medida extrema, hacer que el robot sea idle para que pueda recibir nuevas tareas
@@ -858,15 +1055,31 @@ class RobotAgent(Agent):
                 
                 # Para bloqueos muy prolongados, resetear estado
                 if self.position_unchanged_count > 20:
-                    print(f"Robot {self.unique_id}: BLOQUEO CRÍTICO, RESETEANDO ESTADO")
+                    print(f"Robot {self.unique_id}: BLOQUEO CRÍTICO, RESETEANDO COMPLETAMENTE")
+                    # Reiniciar todos los estados relacionados con movimiento
                     self.returning_to_task = False
-                    # Liberar paquete si no lo ha recogido aún
+                    self.waiting_for_charge = False
+                    self.charging = False
+                    self.nearest_charging_station = None
+                    self.charging_station_target = None
+                    self.critical_battery = False
+                    
+                    # Liberar recursos y reiniciar
                     if self.carrying_package and self.carrying_package.status == 'assigned':
                         self.carrying_package.status = 'waiting'
                         self.carrying_package.assigned_robot_id = None
                         self.carrying_package = None
+                    
+                    # Establecer en idle para recibir nuevas tareas
                     self.idle = True
                     self.path = [self.pos]
+                    
+                    # Resetear contadores de bloqueo
+                    self.position_unchanged_count = 0
+                    self.blocked_count = 0
+                    self.waiting_time = 0
+                    
+                    print(f"Robot {self.unique_id}: Estado completamente reseteado. Esperando nueva tarea.")
                     return
 
         # ===== MOVIMIENTO NORMAL =====
@@ -874,6 +1087,10 @@ class RobotAgent(Agent):
             # Verificar si hay suficiente batería para moverse
             if not self.drain_battery():
                 return  # Batería agotada, no moverse
+            
+            if len(self.path) <= 1:  # Verificación extra por si la ruta cambió
+                print(f"Robot {self.unique_id}: Ruta demasiado corta después de drenar batería")
+                return
                 
             next_pos = self.path[1]  # El siguiente paso en la ruta
             
@@ -1028,6 +1245,9 @@ class RobotAgent(Agent):
         else:
             # Si no tiene ruta o es inválida, imprimir advertencia
             print(f"Robot {self.unique_id}: ADVERTENCIA - No tiene una ruta válida. Path actual: {self.path}")
+            if not self.charging and not self.nearest_charging_station:
+                print(f"Robot {self.unique_id}: Reseteando a estado idle por falta de ruta válida")
+                self.idle = True
     
     def find_alternative_route(self):
         """Busca una ruta alternativa cuando el robot está bloqueado"""
@@ -1171,15 +1391,15 @@ class RobotAgent(Agent):
             return False
     
     def find_alternative_charging_station(self, excluding=None):
-        """
-        Busca una estación de carga alternativa, excluyendo la estación especificada.
+        """Busca una estación de carga alternativa, excluyendo las especificadas"""
+        # Limpiar el estado actual de espera si vamos a buscar otra estación
+        if self.waiting_for_charge and self.current_charging_station:
+            # Eliminar de la cola de la estación actual antes de buscar otra
+            self.current_charging_station.remove_from_queue(self.unique_id)
+            self.waiting_for_charge = False
+            self.current_charging_station = None
         
-        Args:
-            excluding: Coordenadas de la estación a excluir
-            
-        Returns:
-            ChargingStation: La estación alternativa o None si no se encuentra
-        """
+        # Resto del código existente para buscar una estación alternativa...
         if not self.model.charging_stations:
             return None
         
@@ -1639,7 +1859,32 @@ class PathFindingModel(Model):
         
         return True
     
+    # AÑADIR ESTE MÉTODO A LA CLASE PathFindingModel
+    def check_robots_health(self):
+        """Verifica periódicamente el estado de todos los robots"""
+        for robot in self.robots:
+            # Detectar robots con batería crítica no dirigiéndose a cargar
+            if robot.battery_level < robot.max_battery * 0.15 and not robot.charging and not robot.nearest_charging_station:
+                print(f"Robot {robot.unique_id}: ALERTA DE SISTEMA - Batería crítica.")
+                # Forzar búsqueda de estación
+                nearest_station = robot.find_emergency_charging_station()
+                if nearest_station:
+                    robot.nearest_charging_station = nearest_station
+                    robot.charging_station_target = nearest_station
+                    robot.path = robot.calculate_path_to_station(nearest_station)
+            
+            # Detectar robots atascados
+            if hasattr(robot, 'position_unchanged_count') and robot.position_unchanged_count > 10:
+                print(f"Robot {robot.unique_id}: ATENCIÓN - Robot atascado por {robot.position_unchanged_count} pasos.")
+                # Forzar reseteo de estado
+                if hasattr(robot, 'find_alternative_route'):
+                    robot.find_alternative_route()
+                # Aumentar prioridad dramáticamente
+                if hasattr(robot, 'priority'):
+                    robot.priority += 5
+    
     def step(self):
+        self.check_robots_health()
         self.datacollector.collect(self)
         self.schedule.step()
     

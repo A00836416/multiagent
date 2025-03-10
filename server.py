@@ -680,8 +680,9 @@ def get_state():
             'charging': robot.charging,
             'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
             'total_packages_delivered': robot.total_packages_delivered,
-            'idle': getattr(robot, 'idle', False),  # Obtener atributo idle, default False si no existe
-            'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked'
+            'idle': getattr(robot, 'idle', False),
+            'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked',
+            'status': 'charging' if robot.charging else 'goal_reached' if robot.reached_goal else 'moving'
         }
 
         # Añadir información del paquete si el robot lo lleva
@@ -719,6 +720,20 @@ def get_state():
             'pickup_time': package.pickup_time,
             'delivery_time': package.delivery_time
         })
+    
+    # Calcular estadísticas de paquetes entregados
+    delivered_packages_stats = {}
+    if delivered_packages:
+        delivery_times = []
+        for package in delivered_packages:
+            if package.get('pickup_time') is not None and package.get('delivery_time') is not None:
+                delivery_time = package['delivery_time'] - package['pickup_time']
+                delivery_times.append(delivery_time)
+        
+        if delivery_times:
+            delivered_packages_stats['avg_delivery_time'] = sum(delivery_times) / len(delivery_times)
+            delivered_packages_stats['min_delivery_time'] = min(delivery_times)
+            delivered_packages_stats['max_delivery_time'] = max(delivery_times)
 
     # Retornar el estado en formato JSON
     return json.dumps({
@@ -729,7 +744,8 @@ def get_state():
         'all_reached_goal': model.all_robots_reached_goal(),
         'total_packages_delivered': len(model.delivered_packages),
         'active_packages': active_packages,
-        'delivered_packages': delivered_packages
+        'delivered_packages': delivered_packages,
+        'delivered_packages_stats': delivered_packages_stats
     }, indent=4), 200
 
 
@@ -759,7 +775,8 @@ def emit_state():
             'battery_percentage': (robot.battery_level / robot.max_battery) * 100,
             'total_packages_delivered': robot.total_packages_delivered,
             'idle': getattr(robot, 'idle', False),
-            'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked'
+            'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked',
+            'status': 'charging' if robot.charging else 'goal_reached' if robot.reached_goal else 'moving'
         }
         
         # Añadir información del paquete si lo lleva
@@ -775,6 +792,20 @@ def emit_state():
         
         robots_info.append(robot_data)
     
+    # Calcular estadísticas de paquetes entregados
+    delivered_packages_stats = {}
+    if model.delivered_packages:
+        delivery_times = []
+        for package in model.delivered_packages:
+            if package.pickup_time is not None and package.delivery_time is not None:
+                delivery_time = package.delivery_time - package.pickup_time
+                delivery_times.append(delivery_time)
+        
+        if delivery_times:
+            delivered_packages_stats['avg_delivery_time'] = sum(delivery_times) / len(delivery_times)
+            delivered_packages_stats['min_delivery_time'] = min(delivery_times)
+            delivered_packages_stats['max_delivery_time'] = max(delivery_times)
+    
     socketio.emit('state_update', {
         'grid_size': {'width': model.grid.width, 'height': model.grid.height},
         'robots': robots_info,
@@ -782,7 +813,8 @@ def emit_state():
         'charging_stations': charging_stations,
         'all_reached_goal': model.all_robots_reached_goal(),
         'total_packages_delivered': len(model.delivered_packages),
-        'active_packages': len([p for p in model.packages if p.status != 'delivered'])
+        'active_packages': len([p for p in model.packages if p.status != 'delivered']),
+        'delivered_packages_stats': delivered_packages_stats
     })
 
 def emit_robots_update():
@@ -894,7 +926,7 @@ def handle_start_simulation():
                 # Si los robots alcanzaron su meta, detener simulación
                 socketio.emit('simulation_stopped', {'reason': 'completed'})
                 break
-            eventlet.sleep(1)  # Esperar 1 segundo entre pasos
+            eventlet.sleep(0.2)  
     
     # Iniciar la simulación en un green thread de eventlet
     eventlet.spawn(simulation_loop)
