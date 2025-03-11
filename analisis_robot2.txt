@@ -1,0 +1,10 @@
+Análisis de ruta para robot2
+Total de puntos: 154
+Giro brusco detectado en el punto 29: 93.18 grados
+Giro brusco detectado en el punto 60: 93.18 grados
+Giro brusco detectado en el punto 76: 108.43 grados
+Giro brusco detectado en el punto 83: 116.57 grados
+Giro brusco detectado en el punto 122: 75.96 grados
+Giro brusco detectado en el punto 135: 180.00 grados
+Distancia total recorrida: 17.0099
+Número de giros bruscos: 6
