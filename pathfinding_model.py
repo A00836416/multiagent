@@ -555,7 +555,7 @@ class RobotAgent(Agent):
             return False
             
         # Si la batería está muy baja (menos del 15%), activar modo ahorro de energía
-        if self.battery_level < self.max_battery * 0.15 and not self.energy_saving_mode:
+        if self.battery_level < self.max_battery * 0.20 and not self.energy_saving_mode:
             self.energy_saving_mode = True
             print(f"Robot {self.unique_id}: ¡MODO AHORRO DE ENERGÍA ACTIVADO! Reduciendo consumo.")
                 

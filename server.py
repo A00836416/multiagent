@@ -13,6 +13,7 @@ import tempfile
 import datetime
 import json
 import random
+import threading
 from flask import Flask, render_template, request, send_file
 from flask_socketio import SocketIO, emit
 from pathfinding_model import RobotAgent, ObstacleAgent, ChargingStation, PathFindingModel
@@ -28,6 +29,9 @@ model = None
 obstacles = []
 charging_stations = []
 robots_config = []
+simulation_running = False
+simulation_start_time = None  # Variable para almacenar el tiempo de inicio de la simulación
+simulation_thread = None
 
 # Definir las posiciones de los camiones y puntos de entrega
 truck_positions = [
@@ -140,11 +144,15 @@ def handle_disconnect():
 
 @socketio.on('initialize')
 def handle_initialize(data):
-    """Inicializa o reinicia el modelo con parámetros dados"""
-    global model, obstacles, charging_stations, robots_config
+    """Inicializa el modelo con la configuración recibida"""
+    global model, obstacles, charging_stations, robots_config, simulation_start_time
     
-    width = int(data.get('width', 10))
-    height = int(data.get('height', 10))
+    # Resetear el tiempo de simulación
+    simulation_start_time = None
+    
+    # Obtener dimensiones del grid
+    width = data.get('width', 10)
+    height = data.get('height', 10)
     robots_config = [
         # Robots cerca de las estaciones de carga (parte superior derecha)
         {
@@ -215,6 +223,9 @@ def handle_initialize(data):
     
     # Inicializar el modelo con múltiples robots y estaciones de carga
     model = PathFindingModel(width, height, robots_config, charging_stations_config)
+    
+    # Garantizar que el contador de pasos comience en 0
+    model.schedule.steps = 0
     
     obstacles = []
     if obstacles_list:
@@ -752,7 +763,7 @@ def get_state():
 # Funciones de emisión de eventos
 def emit_state():
     """Emite el estado completo del modelo"""
-    global model, obstacles, charging_stations
+    global model, obstacles, charging_stations, simulation_start_time
     
     if model is None:
         return
@@ -793,7 +804,13 @@ def emit_state():
         robots_info.append(robot_data)
     
     # Calcular estadísticas de paquetes entregados
-    delivered_packages_stats = {}
+    delivered_packages_stats = {
+        'count': len(model.delivered_packages),
+        'avg_delivery_time': 0,
+        'min_delivery_time': 0,
+        'max_delivery_time': 0
+    }
+    
     if model.delivered_packages:
         delivery_times = []
         for package in model.delivered_packages:
@@ -806,6 +823,16 @@ def emit_state():
             delivered_packages_stats['min_delivery_time'] = min(delivery_times)
             delivered_packages_stats['max_delivery_time'] = max(delivery_times)
     
+    # Calcular tiempo transcurrido desde el inicio de la simulación
+    elapsed_time = 0
+    if simulation_start_time is not None:
+        elapsed_time = time.time() - simulation_start_time
+    
+    # Calcular paquetes por minuto (si ha pasado al menos un minuto)
+    packages_per_minute = 0
+    if elapsed_time >= 60 and delivered_packages_stats['count'] > 0:
+        packages_per_minute = delivered_packages_stats['count'] / (elapsed_time / 60)
+    
     socketio.emit('state_update', {
         'grid_size': {'width': model.grid.width, 'height': model.grid.height},
         'robots': robots_info,
@@ -814,7 +841,12 @@ def emit_state():
         'all_reached_goal': model.all_robots_reached_goal(),
         'total_packages_delivered': len(model.delivered_packages),
         'active_packages': len([p for p in model.packages if p.status != 'delivered']),
-        'delivered_packages_stats': delivered_packages_stats
+        'delivered_packages_stats': delivered_packages_stats,
+        'simulation_stats': {
+            'elapsed_time': elapsed_time,
+            'total_steps': model.schedule.steps,
+            'packages_per_minute': packages_per_minute
+        }
     })
 
 def emit_robots_update():
@@ -914,30 +946,50 @@ def run_simulation_step():
 @socketio.on('start_simulation')
 def handle_start_simulation():
     """Inicia la simulación automática"""
+    global simulation_running, simulation_thread, simulation_start_time
+    
     if model is None:
         emit('error', {'message': 'Modelo no inicializado'})
         return
     
-    # Usar un enfoque simplificado que funciona mejor con eventlet
-    # En lugar de background_task, usamos un bucle que se ejecuta directamente
-    def simulation_loop():
-        while True:
-            if not run_simulation_step():
-                # Si los robots alcanzaron su meta, detener simulación
-                socketio.emit('simulation_stopped', {'reason': 'completed'})
-                break
-            eventlet.sleep(0.2)  
+    if simulation_running:
+        return
     
-    # Iniciar la simulación en un green thread de eventlet
-    eventlet.spawn(simulation_loop)
-    emit('simulation_started', {'message': 'Simulación iniciada'})
+    simulation_running = True
+    
+    # Establecer el tiempo de inicio de la simulación
+    simulation_start_time = time.time()
+    print(f"Simulación iniciada en: {simulation_start_time}")
+    
+    # Emitir estado inicial con estadísticas
+    emit_state()
+    
+    # Emitir evento de inicio
+    emit('simulation_started', {
+        'message': 'Simulación iniciada',
+        'start_time': simulation_start_time
+    })
+    
+    def simulation_loop():
+        while simulation_running:
+            run_simulation_step()
+            time.sleep(0.5)  # Controlar la velocidad de la simulación
+    
+    # Iniciar un hilo separado para la simulación
+    simulation_thread = threading.Thread(target=simulation_loop)
+    simulation_thread.daemon = True
+    simulation_thread.start()
 
 @socketio.on('stop_simulation')
 def handle_stop_simulation():
     """Detiene la simulación automática"""
-    # La simulación se detendrá cuando el cliente se desconecte o
-    # cuando los robots alcancen su meta
-    emit('simulation_stopped', {'reason': 'user_request'})
+    global simulation_running, simulation_start_time
+    
+    simulation_running = False
+    
+    # No resetear simulation_start_time para mantener el tiempo total transcurrido
+    
+    emit('simulation_stopped', {'reason': 'user'})
 
 # Código para generar la plantilla HTML y ejecutar el servidor
 if __name__ == '__main__':
