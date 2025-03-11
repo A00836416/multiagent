@@ -300,13 +300,7 @@ class RobotAgent(Agent):
                 # Ya no estamos en la cola, restablecer el estado de espera
                 self.waiting_for_charge = False
         
-        # Si no estamos en la cola ni cargando, pero estamos en la estación, intentar añadirnos
-        if not self.waiting_for_charge and not self.charging:
-            station.add_to_queue(self.unique_id)
-            self.waiting_for_charge = True
-            self.current_charging_station = station  # Guardar referencia a la estación actual
-            print(f"Robot {self.unique_id}: Añadido a cola de estación mientras está en posición {station.pos}")
-            return True
+       
             
         return False
 
@@ -803,7 +797,24 @@ class RobotAgent(Agent):
     
     def step(self):
         """Método paso del robot reescrito para solucionar problemas de movimiento y carga"""
-
+        if self.charging:
+            station = self.is_at_charging_station()
+            if not station:
+                print(f"Robot {self.unique_id}: ESTADO INCONSISTENTE DETECTADO - En estado de carga pero fuera de estación")
+                print(f"Robot {self.unique_id}: Posición actual: {self.pos}, Última posición conocida: {self.last_position}")
+                # Detectar robots cercanos que podrían haber causado un desplazamiento
+                nearby_robots = [r for r in self.model.robots if r.unique_id != self.unique_id and 
+                                abs(r.pos[0] - self.pos[0]) + abs(r.pos[1] - self.pos[1]) <= 2]
+                if nearby_robots:
+                    print(f"Robot {self.unique_id}: Robots cercanos: {[(r.unique_id, r.pos) for r in nearby_robots]}")
+                # Corregir el estado inconsistente
+                self.charging = False
+                self.nearest_charging_station = None
+                # Regresar a la estación más cercana si la batería es baja
+                if self.battery_level < self.max_battery * 0.4:
+                    nearest_station = self.find_nearest_charging_station()
+                    if nearest_station:
+                        self.path = self.calculate_path_to_station(nearest_station)
         battery_percentage = self.get_battery_percentage()
     
         # ACCIÓN DE EMERGENCIA para batería crítica
