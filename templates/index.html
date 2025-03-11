@@ -379,6 +379,52 @@
                 <div>Paquetes Activos</div>
                 <div class="stat-value" id="active-packages">0</div>
             </div>
+            <div class="stat-item">
+                <div>Tiempo Transcurrido</div>
+                <div class="stat-value" id="elapsed-time">0:00</div>
+            </div>
+            <div class="stat-item">
+                <div>Paquetes/min</div>
+                <div class="stat-value" id="packages-per-minute">0.0</div>
+            </div>
+        </div>
+        
+        <div class="stats-container">
+            <div class="stat-item">
+                <div>Tiempo Promedio Entrega</div>
+                <div class="stat-value" id="avg-delivery-time">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Tiempo Mínimo Entrega</div>
+                <div class="stat-value" id="min-delivery-time">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Tiempo Máximo Entrega</div>
+                <div class="stat-value" id="max-delivery-time">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Pasos Totales</div>
+                <div class="stat-value" id="total-steps">0</div>
+            </div>
+        </div>       
+                
+        <div class="stats-container">
+            <div class="stat-item">
+                <div>Tiempo Promedio Asignación→Recogida</div>
+                <div class="stat-value" id="avg-assignment-to-pickup">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Tiempo Promedio Recogida→Entrega</div>
+                <div class="stat-value" id="avg-pickup-to-delivery">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Tiempo Promedio Total Proceso</div>
+                <div class="stat-value" id="avg-total-process">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Paquetes Por Robot</div>
+                <div class="stat-value" id="packages-per-robot">0</div>
+            </div>
         </div>
 
         <div>
@@ -568,9 +614,6 @@
             obstacles = data.obstacles;
             chargingStations = data.charging_stations;
             
-            // Depuración - mostrar datos recibidos en la consola
-            console.log('Estado recibido:', data);
-            
             // Actualizar todas las vistas
             updateGrid();
             updateStatus(`Total paquetes entregados: ${data.total_packages_delivered}. Activos: ${data.active_packages}`);
@@ -579,61 +622,59 @@
             document.getElementById('total-delivered').textContent = data.total_packages_delivered;
             document.getElementById('active-packages').textContent = data.active_packages;
             
-            // Actualizar estadísticas de tiempo y entrega
             if (data.simulation_stats) {
-                console.log('Estadísticas de simulación recibidas:', data.simulation_stats);
+                // Formatear tiempo transcurrido (segundos a MM:SS)
+                const elapsed = data.simulation_stats.elapsed_time;
+                const minutes = Math.floor(elapsed / 60);
+                const seconds = Math.floor(elapsed % 60);
+                const formattedTime = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                document.getElementById('elapsed-time').textContent = formattedTime;
                 
-                // Formatear tiempo transcurrido (convertir segundos a formato mm:ss)
-                const elapsedTime = formatTime(data.simulation_stats.elapsed_time);
-                console.log('Tiempo formateado:', elapsedTime);
-                
-                // Actualizar elementos DOM
-                const elapsedTimeElement = document.getElementById('elapsed-time');
-                if (elapsedTimeElement) {
-                    elapsedTimeElement.textContent = elapsedTime;
-                } else {
-                    console.error('Elemento elapsed-time no encontrado');
-                }
-                
-                // Actualizar pasos de simulación
-                const stepsElement = document.getElementById('simulation-steps');
-                if (stepsElement) {
-                    stepsElement.textContent = data.simulation_stats.total_steps;
-                } else {
-                    console.error('Elemento simulation-steps no encontrado');
-                }
-                
-                // Actualizar paquetes por minuto
-                const packagesPerMinuteElement = document.getElementById('packages-per-minute');
-                if (packagesPerMinuteElement) {
-                    packagesPerMinuteElement.textContent = 
-                        data.simulation_stats.packages_per_minute.toFixed(2);
-                } else {
-                    console.error('Elemento packages-per-minute no encontrado');
-                }
-            } else {
-                console.warn('No se recibieron estadísticas de simulación');
+                // Paquetes por minuto
+                document.getElementById('packages-per-minute').textContent = 
+                    data.simulation_stats.packages_per_minute.toFixed(2);
+                    
+                // Pasos totales
+                document.getElementById('total-steps').textContent = 
+                    data.simulation_stats.total_steps;
             }
             
-            // Actualizar estadísticas de entregas
+            // Estadísticas de paquetes entregados
             if (data.delivered_packages_stats) {
-                console.log('Estadísticas de entregas recibidas:', data.delivered_packages_stats);
-                
-                // Tiempo promedio de entrega (en pasos de simulación)
-                const avgDeliveryTime = data.delivered_packages_stats.avg_delivery_time || 0;
-                
-                const avgDeliveryTimeElement = document.getElementById('avg-delivery-time');
-                if (avgDeliveryTimeElement) {
-                    avgDeliveryTimeElement.textContent = avgDeliveryTime.toFixed(1);
-                } else {
-                    console.error('Elemento avg-delivery-time no encontrado');
+                const stats = data.delivered_packages_stats;
+                document.getElementById('avg-delivery-time').textContent = 
+                    stats.avg_delivery_time ? `${stats.avg_delivery_time.toFixed(1)} pasos` : '0 pasos';
+                document.getElementById('min-delivery-time').textContent = 
+                    stats.min_delivery_time ? `${stats.min_delivery_time} pasos` : '0 pasos';
+                document.getElementById('max-delivery-time').textContent = 
+                    stats.max_delivery_time ? `${stats.max_delivery_time} pasos` : '0 pasos';
+                if (document.getElementById('avg-assignment-to-pickup')) {
+                    document.getElementById('avg-assignment-to-pickup').textContent = 
+                        stats.avg_assignment_to_pickup ? `${stats.avg_assignment_to_pickup.toFixed(1)} pasos` : '0 pasos';
                 }
-            } else {
-                console.warn('No se recibieron estadísticas de entregas');
+                if (document.getElementById('avg-pickup-to-delivery')) {
+                    document.getElementById('avg-pickup-to-delivery').textContent = 
+                        stats.avg_pickup_to_delivery ? `${stats.avg_pickup_to_delivery.toFixed(1)} pasos` : '0 pasos';
+                }
+                if (document.getElementById('avg-total-process')) {
+                    document.getElementById('avg-total-process').textContent = 
+                        stats.avg_total_process ? `${stats.avg_total_process.toFixed(1)} pasos` : '0 pasos';
+                }
+                
+                // Calcular paquetes por robot si hay información disponible
+                if (document.getElementById('packages-per-robot')) {
+                    const robotCount = robots.length;
+                    const deliveredCount = stats.count || 0;
+                    if (robotCount > 0) {
+                        document.getElementById('packages-per-robot').textContent = 
+                            (deliveredCount / robotCount).toFixed(1);
+                    }
+                }
             }
             
-            // Actualizar estadísticas detalladas
-            updateDetailedStats(data);
+            // Actualizar otros contadores
+            document.getElementById('total-delivered').textContent = data.total_packages_delivered;
+            document.getElementById('active-packages').textContent = data.active_packages;
         });
         
         socket.on('simulation_complete', (data) => {
@@ -1240,88 +1281,6 @@
             // Añadir un robot por defecto
             addRobot();
         });
-
-        // Función para actualizar estadísticas detalladas
-        function updateDetailedStats(data) {
-            console.log('Actualizando estadísticas detalladas');
-            
-            if (!data.delivered_packages_stats || !data.simulation_stats) {
-                console.warn('Datos insuficientes para actualizar estadísticas detalladas');
-                return;
-            }
-            
-            // Verificar que los elementos existen
-            const elements = [
-                'min-delivery-time', 
-                'max-delivery-time', 
-                'delivery-rate', 
-                'real-time-per-step', 
-                'steps-per-second'
-            ];
-            
-            const missingElements = elements.filter(id => !document.getElementById(id));
-            if (missingElements.length > 0) {
-                console.error('Elementos no encontrados:', missingElements);
-            }
-            
-            // Actualizar estadísticas de tiempo de entrega
-            const minTimeElement = document.getElementById('min-delivery-time');
-            if (minTimeElement) {
-                minTimeElement.textContent = 
-                    data.delivered_packages_stats.min_delivery_time?.toFixed(1) || '0';
-            }
-            
-            const maxTimeElement = document.getElementById('max-delivery-time');
-            if (maxTimeElement) {
-                maxTimeElement.textContent = 
-                    data.delivered_packages_stats.max_delivery_time?.toFixed(1) || '0';
-            }
-            
-            const rateElement = document.getElementById('delivery-rate');
-            if (rateElement) {
-                rateElement.textContent = 
-                    data.simulation_stats.packages_per_minute?.toFixed(2) || '0';
-            }
-            
-            // Calcular estadísticas de rendimiento
-            if (data.simulation_stats.elapsed_time > 0 && data.simulation_stats.total_steps > 0) {
-                const msPerStep = (data.simulation_stats.elapsed_time * 1000) / data.simulation_stats.total_steps;
-                const stepsPerSecond = data.simulation_stats.total_steps / data.simulation_stats.elapsed_time;
-                
-                console.log('Estadísticas de rendimiento calculadas:', {
-                    msPerStep: msPerStep.toFixed(0) + ' ms',
-                    stepsPerSecond: stepsPerSecond.toFixed(2)
-                });
-                
-                const timePerStepElement = document.getElementById('real-time-per-step');
-                if (timePerStepElement) {
-                    timePerStepElement.textContent = `${msPerStep.toFixed(0)} ms`;
-                }
-                
-                const stepsPerSecondElement = document.getElementById('steps-per-second');
-                if (stepsPerSecondElement) {
-                    stepsPerSecondElement.textContent = stepsPerSecond.toFixed(2);
-                }
-            }
-        }
-
-        // Función para formatear tiempo (segundos a mm:ss o hh:mm:ss)
-        function formatTime(seconds) {
-            console.log('Formateando tiempo:', seconds);
-            
-            if (!seconds || isNaN(seconds)) return "0:00";
-            
-            seconds = Math.floor(seconds);
-            const hours = Math.floor(seconds / 3600);
-            const minutes = Math.floor((seconds % 3600) / 60);
-            const secs = seconds % 60;
-            
-            if (hours > 0) {
-                return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-            }
-            
-            return `${minutes}:${secs.toString().padStart(2, '0')}`;
-        }
     </script>
 </body>
 </html>

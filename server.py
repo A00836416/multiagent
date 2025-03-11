@@ -149,6 +149,7 @@ def handle_initialize(data):
     
     # Resetear el tiempo de simulación
     simulation_start_time = None
+    simulation_start_time = time.time()
     
     # Obtener dimensiones del grid
     width = data.get('width', 10)
@@ -813,15 +814,30 @@ def emit_state():
     
     if model.delivered_packages:
         delivery_times = []
+        assignment_to_pickup_times = []  # Tiempo de asignación a recogida
+        pickup_to_delivery_times = []    # Tiempo de recogida a entrega
+        total_process_times = []         # Tiempo total del proceso
         for package in model.delivered_packages:
-            if package.pickup_time is not None and package.delivery_time is not None:
-                delivery_time = package.delivery_time - package.pickup_time
-                delivery_times.append(delivery_time)
+            if package.assignment_time is not None and package.pickup_time is not None and package.delivery_time is not None:
+                assignment_to_pickup = package.pickup_time - package.assignment_time
+                pickup_to_delivery = package.delivery_time - package.pickup_time
+                total_time = package.delivery_time - package.assignment_time
+                
+                assignment_to_pickup_times.append(assignment_to_pickup)
+                pickup_to_delivery_times.append(pickup_to_delivery)
+                total_process_times.append(total_time)
         
         if delivery_times:
             delivered_packages_stats['avg_delivery_time'] = sum(delivery_times) / len(delivery_times)
             delivered_packages_stats['min_delivery_time'] = min(delivery_times)
             delivered_packages_stats['max_delivery_time'] = max(delivery_times)
+
+        if pickup_to_delivery_times:
+            delivered_packages_stats['avg_pickup_to_delivery'] = sum(pickup_to_delivery_times) / len(pickup_to_delivery_times)
+        if assignment_to_pickup_times:
+            delivered_packages_stats['avg_assignment_to_pickup'] = sum(assignment_to_pickup_times) / len(assignment_to_pickup_times)
+        if total_process_times:
+            delivered_packages_stats['avg_total_process'] = sum(total_process_times) / len(total_process_times)
     
     # Calcular tiempo transcurrido desde el inicio de la simulación
     elapsed_time = 0
@@ -921,7 +937,7 @@ def emit_packages_update():
         'delivered_packages': delivered_packages,
         'total_delivered': len(delivered_packages)
     })
-
+step_counter = 0
 # Función para la automatización de pasos
 def run_simulation_step():
     """Ejecuta un paso de la simulación automática"""
@@ -939,6 +955,8 @@ def run_simulation_step():
     # Emitir actualizaciones
     emit_robots_update()
     emit_packages_update()
+    if step_counter % 5 == 0:
+        emit_state()
     
     return True
 
@@ -1383,6 +1401,52 @@ if __name__ == '__main__':
                 <div>Paquetes Activos</div>
                 <div class="stat-value" id="active-packages">0</div>
             </div>
+            <div class="stat-item">
+                <div>Tiempo Transcurrido</div>
+                <div class="stat-value" id="elapsed-time">0:00</div>
+            </div>
+            <div class="stat-item">
+                <div>Paquetes/min</div>
+                <div class="stat-value" id="packages-per-minute">0.0</div>
+            </div>
+        </div>
+        
+        <div class="stats-container">
+            <div class="stat-item">
+                <div>Tiempo Promedio Entrega</div>
+                <div class="stat-value" id="avg-delivery-time">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Tiempo Mínimo Entrega</div>
+                <div class="stat-value" id="min-delivery-time">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Tiempo Máximo Entrega</div>
+                <div class="stat-value" id="max-delivery-time">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Pasos Totales</div>
+                <div class="stat-value" id="total-steps">0</div>
+            </div>
+        </div>       
+                
+        <div class="stats-container">
+            <div class="stat-item">
+                <div>Tiempo Promedio Asignación→Recogida</div>
+                <div class="stat-value" id="avg-assignment-to-pickup">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Tiempo Promedio Recogida→Entrega</div>
+                <div class="stat-value" id="avg-pickup-to-delivery">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Tiempo Promedio Total Proceso</div>
+                <div class="stat-value" id="avg-total-process">0 pasos</div>
+            </div>
+            <div class="stat-item">
+                <div>Paquetes Por Robot</div>
+                <div class="stat-value" id="packages-per-robot">0</div>
+            </div>
         </div>
 
         <div>
@@ -1577,6 +1641,60 @@ if __name__ == '__main__':
             updateStatus(`Total paquetes entregados: ${data.total_packages_delivered}. Activos: ${data.active_packages}`);
             
             // Actualizar contadores
+            document.getElementById('total-delivered').textContent = data.total_packages_delivered;
+            document.getElementById('active-packages').textContent = data.active_packages;
+            
+            if (data.simulation_stats) {
+                // Formatear tiempo transcurrido (segundos a MM:SS)
+                const elapsed = data.simulation_stats.elapsed_time;
+                const minutes = Math.floor(elapsed / 60);
+                const seconds = Math.floor(elapsed % 60);
+                const formattedTime = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                document.getElementById('elapsed-time').textContent = formattedTime;
+                
+                // Paquetes por minuto
+                document.getElementById('packages-per-minute').textContent = 
+                    data.simulation_stats.packages_per_minute.toFixed(2);
+                    
+                // Pasos totales
+                document.getElementById('total-steps').textContent = 
+                    data.simulation_stats.total_steps;
+            }
+            
+            // Estadísticas de paquetes entregados
+            if (data.delivered_packages_stats) {
+                const stats = data.delivered_packages_stats;
+                document.getElementById('avg-delivery-time').textContent = 
+                    stats.avg_delivery_time ? `${stats.avg_delivery_time.toFixed(1)} pasos` : '0 pasos';
+                document.getElementById('min-delivery-time').textContent = 
+                    stats.min_delivery_time ? `${stats.min_delivery_time} pasos` : '0 pasos';
+                document.getElementById('max-delivery-time').textContent = 
+                    stats.max_delivery_time ? `${stats.max_delivery_time} pasos` : '0 pasos';
+                if (document.getElementById('avg-assignment-to-pickup')) {
+                    document.getElementById('avg-assignment-to-pickup').textContent = 
+                        stats.avg_assignment_to_pickup ? `${stats.avg_assignment_to_pickup.toFixed(1)} pasos` : '0 pasos';
+                }
+                if (document.getElementById('avg-pickup-to-delivery')) {
+                    document.getElementById('avg-pickup-to-delivery').textContent = 
+                        stats.avg_pickup_to_delivery ? `${stats.avg_pickup_to_delivery.toFixed(1)} pasos` : '0 pasos';
+                }
+                if (document.getElementById('avg-total-process')) {
+                    document.getElementById('avg-total-process').textContent = 
+                        stats.avg_total_process ? `${stats.avg_total_process.toFixed(1)} pasos` : '0 pasos';
+                }
+                
+                // Calcular paquetes por robot si hay información disponible
+                if (document.getElementById('packages-per-robot')) {
+                    const robotCount = robots.length;
+                    const deliveredCount = stats.count || 0;
+                    if (robotCount > 0) {
+                        document.getElementById('packages-per-robot').textContent = 
+                            (deliveredCount / robotCount).toFixed(1);
+                    }
+                }
+            }
+            
+            // Actualizar otros contadores
             document.getElementById('total-delivered').textContent = data.total_packages_delivered;
             document.getElementById('active-packages').textContent = data.active_packages;
         });

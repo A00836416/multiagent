@@ -13,6 +13,7 @@ class Package:
         self.assigned_robot_id = None
         self.pickup_time = None
         self.delivery_time = None
+        self.assignment_time = None  # Nuevo: Cuándo se asignó
 
 class ObstacleAgent(Agent):
     """Agente que representa un obstáculo en el grid"""
@@ -434,6 +435,7 @@ class RobotAgent(Agent):
         self.carrying_package = package
         package.assigned_robot_id = self.unique_id
         package.status = 'assigned'
+        package.assignment_time = self.model.schedule.steps
         # Establecer el punto de recogida como destino
         self.package_destination = package.pickup_location
         # Cambiar la meta a la ubicación de recogida
