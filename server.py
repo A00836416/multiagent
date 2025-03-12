@@ -886,7 +886,7 @@ def handle_start_simulation():
     def simulation_loop():
         while simulation_running:
             run_simulation_step()
-            time.sleep(0.5)  # Controlar la velocidad de la simulación
+            time.sleep(0.1)  # Controlar la velocidad de la simulación
     
     # Iniciar un hilo separado para la simulación
     simulation_thread = threading.Thread(target=simulation_loop)
