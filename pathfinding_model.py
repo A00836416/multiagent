@@ -13,7 +13,7 @@ class Package:
         self.assigned_robot_id = None
         self.pickup_time = None
         self.delivery_time = None
-        self.assignment_time = None  # Nuevo: Cuándo se asignó
+        self.assignment_time = None  
 
 class ObstacleAgent(Agent):
     """Agente que representa un obstáculo en el grid"""
@@ -88,7 +88,7 @@ class RobotAgent(Agent):
         self.goal = goal
         self.path = self.astar(start, goal)
         self.steps_taken = 0
-        self.color = color  # Añadimos un color para identificar cada robot
+        self.color = color  
         self.reached_goal = False
         
         # Parámetros de batería
@@ -104,7 +104,7 @@ class RobotAgent(Agent):
         self.last_position = None  # Para detectar si el robot está atascado
         self.position_unchanged_count = 0  # Contador de pasos en los que no ha cambiado de posición
         self.alternative_paths_tried = []  # Guardar rutas alternativas ya intentadas
-        self.priority = 1  # Prioridad base del robot (mayor número = mayor prioridad)
+        self.priority = 1  # Prioridad base del robot 
         self.returning_to_task = False
         # Añadir estas líneas al final del constructor:
         self.carrying_package = None  # Paquete que lleva el robot
@@ -115,15 +115,15 @@ class RobotAgent(Agent):
         # Añadir variables para prevenir bucles de carga
         self.just_charged = False  # Indica si acaba de salir de una estación de carga
         self.charge_cooldown = 0   # Contador de pasos desde la última carga
-        # Añadir modo de ahorro de energía
+        
         self.energy_saving_mode = False
-        self.energy_saving_drain_rate = 0.3  # Tasa reducida en modo ahorro
+        self.energy_saving_drain_rate = 0.3  
         self.waiting_for_charge = False  # Indica si está esperando para cargar
         self.charging_station_target = None  # Guarda la referencia a la estación objetivo
         self.critical_battery = False  # Indica si la batería está en nivel crítico
-        self.emergency_route = False   # Indica si está en ruta de emergencia a una estación
-        self.critical_battery_threshold = 20  # Medidas especiales al 20%
-        self.emergency_battery_threshold = 10  # Acciones drásticas al 10%
+        self.emergency_route = False  
+        self.critical_battery_threshold = 20  
+        self.emergency_battery_threshold = 10  
         
         if not self.path:
             print(f"Robot {unique_id}: No se encontró camino del inicio al objetivo.")
@@ -862,7 +862,7 @@ class RobotAgent(Agent):
             self.returning_to_task = False
             return
         
-        # ===== ACTUALIZAR COOLDOWN POST-CARGA =====
+        # ACTUALIZAR COOLDOWN POST-CARGA 
         # Actualizar contador de cooldown
         if hasattr(self, 'just_charged') and self.just_charged:
             if not hasattr(self, 'charge_cooldown'):
@@ -874,9 +874,8 @@ class RobotAgent(Agent):
                 self.charge_cooldown = 0
                 print(f"Robot {self.unique_id}: Fin de periodo de gracia tras carga")
         
-        # ===== VERIFICACIÓN DE BATERÍA SUFICIENTE =====
-        # Solo verificar si no está cargando, no está buscando una estación, no está en periodo de gracia
-        # y no está esperando para cargar
+        # VERIFICACIÓN DE BATERÍA SUFICIENTE
+        
         if (not self.charging and not self.nearest_charging_station and 
             not (hasattr(self, 'just_charged') and self.just_charged) and 
             not self.waiting_for_charge):
@@ -920,7 +919,7 @@ class RobotAgent(Agent):
                 else:
                     print(f"Robot {self.unique_id}: No hay estaciones de carga disponibles.")
         
-        # ===== MANEJO DE ESTACIÓN DE CARGA =====
+        #MANEJO DE ESTACIÓN DE CARGA
         if self.charging:
             # Verificar si sigue en la estación
             station = self.is_at_charging_station()
@@ -1042,14 +1041,14 @@ class RobotAgent(Agent):
                 self.path = [self.pos]
                 return  # Terminar este paso para permitir recálculo en el siguiente
 
-        # ===== DETECCIÓN DE BLOQUEO =====
+        #  DETECCIÓN DE BLOQUEO 
         # Actualizar contador de posición sin cambios
         if self.last_position == self.pos:
             self.position_unchanged_count += 1
         else:
             self.position_unchanged_count = 0
             self.last_position = self.pos
-        # ===== MANEJO ESPECIAL DE BLOQUEOS CERCA DE ESTACIONES DE CARGA =====
+        #  MANEJO ESPECIAL DE BLOQUEOS CERCA DE ESTACIONES DE CARGA 
         # Verificar si estamos bloqueados cerca de una estación de carga
         if self.handle_charging_station_blocking():
             return  # Si se tomó alguna acción, terminar el paso
@@ -1095,7 +1094,7 @@ class RobotAgent(Agent):
                     print(f"Robot {self.unique_id}: Estado completamente reseteado. Esperando nueva tarea.")
                     return
 
-        # ===== MOVIMIENTO NORMAL =====
+        #  MOVIMIENTO NORMAL 
         if len(self.path) > 1:  # Verificar que hay al menos un paso más en la ruta
             # Verificar si hay suficiente batería para moverse
             if not self.drain_battery():
@@ -1830,7 +1829,7 @@ class PathFindingModel(Model):
                 return False
                 
         if not self.has_obstacle(pos):
-            # Crear un nuevo agente obstáculo
+            
             obstacle_id = len(self.obstacles) + 100  # IDs únicos para obstáculos
             obstacle = ObstacleAgent(obstacle_id, self)
             self.obstacles.append(obstacle)
@@ -1853,7 +1852,7 @@ class PathFindingModel(Model):
     
     def add_charging_station(self, pos):
         """Añade una estación de carga en la posición especificada"""
-        # Asegurar que pos sea una tupla
+        
         if isinstance(pos, list):
             pos = tuple(pos)
             
@@ -1866,7 +1865,7 @@ class PathFindingModel(Model):
             if station.pos == pos:
                 return False
                 
-        # Crear nueva estación de carga (no es un agente)
+        
         station = ChargingStation(pos)
         self.charging_stations.append(station)
         

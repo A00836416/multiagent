@@ -19,12 +19,12 @@ from flask_socketio import SocketIO, emit
 from pathfinding_model import RobotAgent, ObstacleAgent, ChargingStation, PathFindingModel
 
 
-# Crear la aplicación Flask
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'robotsimulation2025'  # Clave secreta para sesiones
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Modelo global para mantener el estado
+
 model = None
 obstacles = []
 charging_stations = []
@@ -266,7 +266,7 @@ def handle_initialize(data):
             'is_carrying': robot.carrying_package is not None and robot.carrying_package.status == 'picked'
         })
     
-    # Generar 2000 paquetes automáticamente después de la inicialización
+    
     generate_initial_packages(2000)
     
     # Emitir evento de inicialización exitosa
@@ -487,111 +487,6 @@ def handle_add_charging_station(data):
         })
     else:
         emit('error', {'message': 'No se puede añadir estación de carga en la posición especificada'})
-
-@socketio.on('add_robot')
-def handle_robot_added(data):
-    """Añade un nuevo robot a la simulación"""
-    global model, robots_config
-    
-    if model is None:
-        emit('error', {'message': 'Modelo no inicializado'})
-        return
-    
-    start_x = int(data.get('start_x', 0))
-    start_y = int(data.get('start_y', 0))
-    goal_x = int(data.get('goal_x', start_x))  # Default to start if not specified
-    goal_y = int(data.get('goal_y', start_y))  # Default to start if not specified
-    color = data.get('color', "blue")  # Color por defecto
-    idle = data.get('idle', True)  # Por defecto, el robot está en idle
-    
-    # Parámetros de batería
-    max_battery = float(data.get('max_battery', 100))
-    battery_level = float(data.get('battery_level', max_battery))
-    battery_drain_rate = float(data.get('battery_drain_rate', 1))
-    
-    start = (start_x, start_y)  # Usar tupla
-    goal = (goal_x, goal_y)  # Usar tupla
-    
-    # Verificar que las posiciones no estén ocupadas por obstáculos
-    if model.has_obstacle(start) or model.has_obstacle(goal):
-        emit('error', {'message': 'Las posiciones de inicio o meta están ocupadas por obstáculos'})
-        return
-    
-    # Crear nuevo robot
-    new_robot_id = len(model.robots) + 1
-    new_robot = RobotAgent(
-        new_robot_id, model, start, goal, color,
-        max_battery=max_battery,
-        battery_drain_rate=battery_drain_rate,
-        battery_level=battery_level
-    )
-    
-    # Establecer estado idle
-    new_robot.idle = idle
-    
-    # Si está en idle, limpiar la ruta
-    if idle:
-        new_robot.path = []
-    
-    # Añadir a la lista de robots y al programador
-    model.robots.append(new_robot)
-    model.schedule.add(new_robot)
-    model.grid.place_agent(new_robot, start)
-    
-    # Actualizar configuración de robots
-    robots_config.append({
-        'start': start,
-        'goal': goal,
-        'color': color,
-        'max_battery': max_battery,
-        'battery_drain_rate': battery_drain_rate,
-        'battery_level': battery_level,
-        'idle': idle
-    })
-    
-    emit('robot_added', {
-        'robot': {
-            'id': new_robot.unique_id,
-            'start': {'x': start[0], 'y': start[1]},
-            'goal': {'x': goal[0], 'y': goal[1]},
-            'position': {'x': start[0], 'y': start[1]},
-            'path': [{'x': pos[0], 'y': pos[1]} for pos in new_robot.path] if new_robot.path else [],
-            'color': color,
-            'battery_level': battery_level,
-            'max_battery': max_battery,
-            'charging': False,
-            'battery_percentage': (battery_level / max_battery) * 100,
-            'idle': idle,
-            'is_carrying': False  # Un robot nuevo nunca está llevando un paquete
-        }
-    })
-
-@socketio.on('create_package')
-def handle_create_package():
-    """Crea un nuevo paquete"""
-    global model
-    
-    if model is None:
-        emit('error', {'message': 'Modelo no inicializado'})
-        return
-    
-    # Si no se especifican ubicaciones, seleccionar aleatoriamente
-    truck_pos = random.choice(truck_positions)
-    delivery_pos = random.choice(delivery_positions)
-    
-    package = model.create_package(truck_pos, delivery_pos)
-    
-    emit('package_created', {
-        'package': {
-            'id': package.id,
-            'pickup': {'x': package.pickup_location[0], 'y': package.pickup_location[1]},
-            'delivery': {'x': package.delivery_location[0], 'y': package.delivery_location[1]},
-            'status': package.status
-        }
-    })
-    
-    # También emitir el estado actualizado de paquetes
-    emit_packages_update()
 
 @socketio.on('create_packages')
 def handle_create_packages(data):
@@ -1018,7 +913,7 @@ if __name__ == '__main__':
     # Aplicar el parche para la asignación automática de paquetes
     modify_robot_deliver_package()
     
-    # Generar la interfaz HTML con funciones WebSocket
+    
     with open('templates/index.html', 'w') as f:
         f.write("""<!DOCTYPE html>
 <html lang="es">
